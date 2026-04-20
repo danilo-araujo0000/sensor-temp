@@ -165,9 +165,11 @@
       border: 1px solid rgba(255, 255, 255, 0.15);
       transition: all 0.2s ease;
       font-family: inherit;
+      text-decoration: none;
+      display: inline-block;
     }
     
-    .btn:hover { background: rgba(255, 255, 255, 0.15); }
+    .btn:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
 
     .btn.primary { background: var(--blue); color: #ffffff; border-color: transparent; }
     .btn.primary:hover { background: #5c81ff; box-shadow: 0 4px 12px var(--blue-glow); }
@@ -366,15 +368,126 @@
       font-weight: 300;
     }
 
+    @media (max-width: 480px) {
+      .bar-label {
+        font-size: 0.65rem;
+        transform: rotate(-45deg);
+        margin-top: 6px;
+        display: inline-block;
+      }
+    }
+
     @media (max-width: 900px) {
       .header-row { flex-direction: column; }
     }
+
+    /* Agendamento UI */
+    .schedule-grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; margin-top: 16px; }
+    .form-group { display: flex; flex-direction: column; gap: 8px; }
+    .form-group label { font-size: 0.9rem; color: var(--text-muted); }
+    .form-control { 
+      background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); 
+      color: #fff; padding: 12px; border-radius: 8px; font-family: inherit; width: 100%;
+    }
+    .form-control:focus { outline: none; border-color: var(--blue); }
+    .days-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .day-btn {
+      width: 40px; height: 40px; border-radius: 50%; padding: 0;
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+      color: var(--text-muted); cursor: pointer; transition: all 0.2s;
+      display: flex; align-items: center; justify-content: center; font-weight: 600; font-size:0.9rem;
+    }
+    .day-btn.active {
+      background: var(--blue); border-color: var(--blue); color: #fff;
+    }
+    @media (max-width: 600px) {
+      body { padding: 16px 12px; }
+      .header-card { padding: 18px; border-radius: 18px; }
+      .meta-grid { grid-template-columns: 1fr; gap: 12px; }
+      .title-input { font-size: 1.6rem; }
+      .save-row { flex-direction: column; gap: 8px; width: 100%; }
+      .save-row .btn { width: 100%; text-align: center; }
+      .schedule-grid { grid-template-columns: 1fr; }
+      .modal-content { padding: 16px; width: 95%; border-radius: 16px; }
+      .days-row { justify-content: center; }
+      .header-row > div:first-child { width: 100%; }
+    }
+    
+    /* Config Modal */
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(10px);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 2000; opacity: 0; pointer-events: none; transition: opacity 0.3s;
+    }
+    .modal-overlay.active { opacity: 1; pointer-events: auto; }
+    .modal-content {
+      background: var(--panel); border: 1px solid var(--panel-border);
+      border-radius: 20px; padding: 24px; width: 90%; max-width: 650px;
+      max-height: 90vh; overflow-y: auto; position: relative;
+    }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+    .modal-header h2 { margin: 0; font-size: 1.5rem; }
+    .btn-close { background: transparent; border: none; color: var(--text-muted); font-size: 2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px;}
+    .btn-close:hover { color: #fff; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="topbar">
       <a href="/" class="back-link">Voltar ao dashboard</a>
+      <a id="btn-report" href="#" class="btn primary">Relatório Completo</a>
+    </div>
+
+    <!-- Modal de Agendamento -->
+    <div id="schedule-modal" class="modal-overlay">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>📅 Regras de Agendamento</h2>
+          <button id="btn-close-sch" class="btn-close">&times;</button>
+        </div>
+        <div class="schedule-grid">
+          <div class="form-group">
+            <label>Modo de Funcionamento</label>
+            <select id="sch-mode" class="form-control sch-input">
+              <option value="always">Sempre Ativo (24/7)</option>
+              <option value="custom">Programação Customizada</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Dias Especiais de Plantão</label>
+            <select id="sch-alt" class="form-control sch-input">
+              <option value="none">Trabalhar todos os dias do calendário</option>
+              <option value="even">Somente Calendário Par (2, 4, 6...)</option>
+              <option value="odd">Somente Calendário Ímpar (1, 3, 5...)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Horário Inicial da Vigilância</label>
+            <input type="time" id="sch-start" class="form-control sch-input" value="00:00" />
+          </div>
+          <div class="form-group">
+            <label>Horário Final do Bloqueio</label>
+            <input type="time" id="sch-end" class="form-control sch-input" value="23:59" />
+          </div>
+        </div>
+        <div class="form-group" style="margin-top:24px; margin-bottom:24px;">
+          <label>Dias da Semana Permitidos</label>
+          <div class="days-row" id="sch-days">
+            <button class="day-btn sch-input" data-day="0" type="button">Dom</button>
+            <button class="day-btn sch-input" data-day="1" type="button">Seg</button>
+            <button class="day-btn sch-input" data-day="2" type="button">Ter</button>
+            <button class="day-btn sch-input" data-day="3" type="button">Qua</button>
+            <button class="day-btn sch-input" data-day="4" type="button">Qui</button>
+            <button class="day-btn sch-input" data-day="5" type="button">Sex</button>
+            <button class="day-btn sch-input" data-day="6" type="button">Sáb</button>
+          </div>
+        </div>
+        <div style="display:flex; justify-content:flex-end; align-items:center; gap: 12px; margin-top:16px;">
+          <span id="save-sch-feedback" class="subline" style="margin:0;"></span>
+          <button id="save-schedule" class="btn primary" type="button">Salvar Regras</button>
+        </div>
+      </div>
     </div>
 
     <section class="header-card glass-panel" id="header-card">
@@ -387,7 +500,8 @@
             <span>CARREGANDO</span>
           </div>
           <div class="save-row">
-            <button id="save-name" class="btn primary" type="button">Salvar nome</button>
+            <button id="save-name" class="btn" type="button">Salvar nome</button>
+            <button id="btn-open-sch" class="btn" type="button">⚙️ Regras de Agendamento</button>
             <span id="save-feedback" class="subline" style="margin:0;"></span>
           </div>
         </div>
@@ -434,6 +548,11 @@
     let currentRange = '24h';
     let currentDetail = null;
 
+    // Configurando link do botão de relatório
+    if (sensorId) {
+      document.getElementById('btn-report').href = `/report?sensor_id=${encodeURIComponent(sensorId)}`;
+    }
+
     function relativeTimeFromSeconds(seconds) {
       if (seconds == null) return 'Sem registro';
       if (seconds < 60) return `${seconds}s atrás`;
@@ -467,6 +586,7 @@
       currentDetail = detail;
       document.title = `${detail.sensor.name} | Sensor Detail`;
       document.getElementById('sensor-name').value = detail.sensor.name;
+      
       document.getElementById('subline').textContent = `${detail.sensor.sensor_id} · Atividade em ${detail.analysis.range}`;
       document.getElementById('last-detection').textContent = relativeTimeFromSeconds(detail.sensor.last_motion_ago_seconds);
       document.getElementById('range-count').textContent = `${detail.analysis.total_movements}`;
@@ -482,6 +602,18 @@
       });
       applyStatus(detail);
       renderChart(detail);
+
+      if (!window.isScheduleEditing) {
+        document.getElementById('sch-mode').value = detail.sensor.schedule_mode;
+        document.getElementById('sch-alt').value = detail.sensor.schedule_alternate;
+        document.getElementById('sch-start').value = detail.sensor.schedule_start;
+        document.getElementById('sch-end').value = detail.sensor.schedule_end;
+        
+        const days = detail.sensor.schedule_days.split(',');
+        document.querySelectorAll('.day-btn').forEach(btn => {
+           btn.classList.toggle('active', days.includes(btn.dataset.day));
+        });
+      }
     }
 
     async function loadDetail(rangeKey = currentRange) {
@@ -550,13 +682,68 @@
 
     setInterval(() => {
       if (currentDetail) {
-        // Atualiza a visualização do tempo sem perder o foco na página ou dar flickering agressivo
         document.getElementById('last-detection').textContent = relativeTimeFromSeconds(currentDetail.sensor.last_motion_ago_seconds == null ? null : currentDetail.sensor.last_motion_ago_seconds + 1);
         if (currentDetail.sensor.last_motion_ago_seconds != null) {
           currentDetail.sensor.last_motion_ago_seconds += 1;
         }
       }
     }, 1000);
+
+    // Controle de Edição do Agendamento
+    window.isScheduleEditing = false;
+    document.querySelectorAll('.sch-input').forEach(el => {
+      el.addEventListener('focus', () => { window.isScheduleEditing = true; });
+      el.addEventListener('blur', () => { window.isScheduleEditing = false; });
+      el.addEventListener('change', () => { window.isScheduleEditing = true; });
+    });
+
+    document.querySelectorAll('.day-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        window.isScheduleEditing = true;
+        btn.classList.toggle('active');
+      });
+    });
+
+    document.getElementById('save-schedule').addEventListener('click', async () => {
+      const fb = document.getElementById('save-sch-feedback');
+      const payload = {
+        sensor_id: sensorId,
+        schedule_mode: document.getElementById('sch-mode').value,
+        schedule_alternate: document.getElementById('sch-alt').value,
+        schedule_start: document.getElementById('sch-start').value,
+        schedule_end: document.getElementById('sch-end').value,
+        schedule_days: Array.from(document.querySelectorAll('.day-btn.active')).map(b => b.dataset.day).join(',')
+      };
+
+      try {
+        await apiPost('/api/sensors/schedule', payload);
+        fb.textContent = 'Salvo com sucesso!';
+        fb.style.color = 'var(--green)';
+        window.isScheduleEditing = false;
+        await loadDetail(currentRange);
+        setTimeout(() => {
+           document.getElementById('schedule-modal').classList.remove('active');
+        }, 1000); // Close automatically after 1s
+      } catch (err) {
+        fb.textContent = 'Erro ao salvar!';
+        fb.style.color = 'var(--danger)';
+      }
+      setTimeout(() => fb.textContent = '', 3000);
+    });
+
+    document.getElementById('btn-open-sch').addEventListener('click', () => {
+      document.getElementById('schedule-modal').classList.add('active');
+    });
+
+    document.getElementById('btn-close-sch').addEventListener('click', () => {
+      document.getElementById('schedule-modal').classList.remove('active');
+    });
+
+    document.getElementById('schedule-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'schedule-modal') {
+        document.getElementById('schedule-modal').classList.remove('active');
+      }
+    });
 
     loadDetail();
     setInterval(() => loadDetail(currentRange), 5000);

@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relatório - Motion Hub</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    :root {
+      --bg-dark: #0a0b10;
+      --bg-gradient-1: rgba(59, 99, 255, 0.15);
+      --bg-gradient-2: rgba(147, 51, 234, 0.15);
+      --bg-gradient-3: rgba(34, 182, 120, 0.1);
+      
+      --panel: rgba(20, 22, 35, 0.6);
+      --panel-border: rgba(255, 255, 255, 0.08);
+      
+      --text: #ffffff;
+      --text-muted: #9ba3b5;
+      
+      --blue: #4f75ff;
+      --green: #22c55e;
+      --orange: #f59e0b;
+      --danger: #ef4444;
+      --gray: #64748b;
+      
+      --blue-glow: rgba(79, 117, 255, 0.4);
+      --green-glow: rgba(34, 197, 94, 0.4);
+      --orange-glow: rgba(245, 158, 11, 0.4);
+      --danger-glow: rgba(239, 68, 68, 0.4);
+    }
+
+    * { box-sizing: border-box; }
+    
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background-color: var(--bg-dark);
+      background-image: 
+        radial-gradient(ellipse at top left, var(--bg-gradient-1), transparent 40%),
+        radial-gradient(ellipse at bottom right, var(--bg-gradient-2), transparent 40%),
+        radial-gradient(ellipse at bottom center, var(--bg-gradient-3), transparent 50%);
+      background-attachment: fixed;
+      color: var(--text);
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 30px 20px 40px;
+      line-height: 1.5;
+    }
+
+    .wrap {
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .back-link {
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 600;
+      padding: 10px 18px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      transition: all 0.2s ease;
+    }
+    
+    .back-link:hover {
+      background: rgba(255, 255, 255, 0.1);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+
+    .glass-panel {
+      border-radius: 24px;
+      background: var(--panel);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--panel-border);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+      padding: 24px;
+    }
+
+    .page-header {
+      margin-bottom: 24px;
+    }
+    
+    .page-header h1 {
+      margin: 0;
+      font-size: 2rem;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .page-header p {
+      margin: 4px 0 0;
+      color: var(--text-muted);
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+
+    .search-input {
+      flex: 1;
+      min-width: 250px;
+      padding: 16px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.03);
+      color: #fff;
+      font-family: inherit;
+      font-size: 1.1rem;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .search-input:focus {
+      outline: none;
+      border-color: var(--blue);
+      box-shadow: 0 0 12px var(--blue-glow);
+    }
+    
+    .search-input::placeholder {
+      color: rgba(255, 255, 255, 0.3);
+    }
+    
+    .btn-advanced {
+      padding: 0 24px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-muted);
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-advanced:hover {
+      background: rgba(147, 51, 234, 0.2);
+      border-color: rgba(147, 51, 234, 0.5);
+      color: #fff;
+    }
+
+    .results-count {
+      color: var(--text-muted);
+      margin-bottom: 16px;
+      font-weight: 600;
+    }
+
+    .report-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+    }
+
+    .report-item {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 20px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      transition: transform 0.2s ease, background 0.2s ease;
+    }
+    
+    .report-item:hover {
+      background: rgba(255, 255, 255, 0.06);
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+
+    .report-item .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background-color: var(--danger);
+      box-shadow: 0 0 10px var(--danger-glow);
+      flex-shrink: 0;
+    }
+
+    .report-time {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #ffffff;
+      line-height: 1.2;
+    }
+
+    .report-date {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+    
+    .empty-state {
+      padding: 40px 0;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 1.1rem;
+    }
+
+    .snap-box {
+      width: 64px;
+      height: 64px;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 2px solid rgba(255,255,255,0.1);
+      transition: transform 0.2s, border-color 0.2s;
+      flex-shrink: 0;
+      cursor: pointer;
+      position: relative;
+      background: #1a1a2e;
+    }
+    .snap-box:hover {
+      border-color: var(--blue);
+      transform: scale(1.05);
+    }
+    .snap-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .play-overlay {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.4); color: #fff; font-size: 1.5rem; opacity: 0.8; transition: opacity 0.2s;
+    }
+    .snap-box:hover .play-overlay { opacity: 1; color: var(--blue); }
+    
+    .btn-more {
+      width: 100%; padding: 16px; margin-top: 16px; border-radius: 12px; border: 1px dashed rgba(255,255,255,0.2);
+      background: transparent; color: var(--text-muted); cursor: pointer; font-size: 1rem; font-weight: 600;
+      transition: all 0.2s;
+    }
+    .btn-more:hover { border-color: var(--blue); color: #fff; background: rgba(79, 117, 255, 0.1); }
+    
+
+
+    .video-modal {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(10px);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 2000; opacity: 0; pointer-events: none; transition: opacity 0.3s;
+    }
+    .video-modal.active { opacity: 1; pointer-events: auto; }
+    .video-modal-content {
+      position: relative; width: 90%; max-width: 800px;
+      background: var(--panel); border: 1px solid var(--panel-border);
+      border-radius: 16px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    }
+    .video-modal-close {
+      position: absolute; top: 10px; right: 10px;
+      background: rgba(0,0,0,0.5); border: none; color: #fff; border-radius: 50%;
+      width: 36px; height: 36px; font-size: 1.5rem; cursor: pointer; z-index: 10;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .video-modal-close:hover { background: rgba(0,0,0,0.8); }
+    .video-modal video { width: 100%; display: block; max-height: 80vh; object-fit: contain; }
+
+    @media (max-width: 600px) {
+      body { padding: 16px 12px; }
+      .glass-panel { padding: 16px; border-radius: 16px; min-height: 400px; }
+      .page-header h1 { font-size: 2rem; }
+      .report-item { flex-direction: column; align-items: flex-start; gap: 12px; }
+      .report-time { font-size: 1.1rem; }
+      .snap-box { width: 100%; height: 200px; border-radius: 12px; }
+      .video-modal-content { width: 95%; max-height: 95vh; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <a id="back-btn" href="/" class="back-link">&larr; Voltar ao sensor</a>
+    </div>
+
+    <div class="glass-panel">
+      <div class="page-header">
+        <h1>Relatório de Movimentos</h1>
+        <p id="sensor-subline">Carregando histórico do sensor...</p>
+      </div>
+
+      <div class="toolbar">
+        <input type="text" id="search-input" class="search-input" placeholder="Pesquisar por data (ex: 20/04) ou hora (ex: 15:30)..." />
+        <button class="btn-advanced" style="display:none;" onclick="deepSearch500()" id="btn-adv"><i class="fa-solid fa-server"></i> Busca Profunda (500 itens)</button>
+      </div>
+
+      <div class="results-count" id="results-count"> Carregando registros...</div>
+      
+      <div class="report-grid" id="report-grid">
+        <!-- Renderizado via JS -->
+      </div>
+      
+      <button class="btn-more" id="btn-more" onclick="loadMore()" style="display:none;">↓ Carregar Mais Registros</button>
+    </div>
+  </div>
+
+  <div id="video-modal" class="video-modal">
+    <div class="video-modal-content">
+      <button class="video-modal-close" onclick="closeModal()">&times;</button>
+      <video id="modal-video-player" controls autoplay></video>
+    </div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const sensorId = params.get('sensor_id');
+    
+    // Configura botao de voltar dinamico
+    const backBtn = document.getElementById('back-btn');
+    if (sensorId) {
+      backBtn.href = `/sensor?sensor_id=${encodeURIComponent(sensorId)}`;
+    }
+    
+    let allMovements = [];
+    let currentOffset = 0;
+    const PAGE_SIZE = 10;
+    let isSearchActive = false;
+
+    async function loadReport(append = false) {
+      const grid = document.getElementById('report-grid');
+      const countEl = document.getElementById('results-count');
+      const subline = document.getElementById('sensor-subline');
+      const btnMore = document.getElementById('btn-more');
+      
+      if (!sensorId) {
+        grid.innerHTML = '<div class="empty-state">ID do sensor não fornecido.</div>';
+        countEl.textContent = 'Erro';
+        return;
+      }
+      
+      subline.textContent = `Sensor: ${sensorId}`;
+      if (!append) btnMore.style.display = 'none';
+
+      try {
+        const response = await fetch(`/api/sensors/movements?sensor_id=${encodeURIComponent(sensorId)}&limit=${PAGE_SIZE}&offset=${currentOffset}`);
+        const data = await response.json();
+        
+        if (!data.ok || !data.movements || data.movements.length === 0) {
+          if (!append) {
+            grid.innerHTML = '<div class="empty-state">Nenhum movimento registrado para este sensor.</div>';
+            countEl.textContent = '0 resultados';
+          } else {
+            btnMore.style.display = 'none';
+          }
+          return;
+        }
+
+        const newMovs = data.movements.map(mov => {
+          const dt = new Date(mov.occurred_at);
+          return {
+            raw: mov,
+            timeStr: dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            dateStr: dt.toLocaleDateString('pt-BR')
+          };
+        });
+
+        if (append) {
+           allMovements = allMovements.concat(newMovs);
+        } else {
+           allMovements = newMovs;
+        }
+
+        renderList(allMovements);
+        
+        if (data.movements.length === PAGE_SIZE && !isSearchActive) {
+           btnMore.style.display = 'block';
+        } else {
+           btnMore.style.display = 'none';
+        }
+      } catch (err) {
+        if (!append) grid.innerHTML = '<div class="empty-state" style="color:var(--danger)">Falha na requisição dos dados. Tente novamente mais tarde.</div>';
+        countEl.textContent = 'Erro ao carregar';
+      }
+    }
+    
+    function loadMore() {
+       currentOffset += PAGE_SIZE;
+       loadReport(true);
+    }
+    
+    function renderList(list) {
+      const grid = document.getElementById('report-grid');
+      const countEl = document.getElementById('results-count');
+      
+      countEl.textContent = `Exibindo ${list.length} registro(s)`;
+      
+      if (list.length === 0) {
+        grid.innerHTML = '<div class="empty-state">Nenhum resultado filtrado. Tente outra busca.</div>';
+        return;
+      }
+
+      grid.innerHTML = list.map(item => {
+        let thumbContent = '';
+        if (item.raw.image_path) {
+           if (item.raw.image_path.endsWith('.mp4')) {
+              let thumbPath = item.raw.image_path.replace('.mp4', '.jpg');
+              thumbContent = `
+                <div class="snap-box" title="Assistir Vídeo MP4" onclick="openModal('/snapshots/${item.raw.image_path}')">
+                  <img src="/snapshots/${thumbPath}" alt="Thumbnail FFmpeg" onerror="this.onerror=null; this.src='data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' viewBox=\\'0 0 100 100\\'%3E%3Crect width=\\'100\\' height=\\'100\\' fill=\\'%23333\\'/%3E%3Ctext x=\\'50\\' y=\\'55\\' font-family=\\'Arial\\' font-size=\\'12\\' fill=\\'%239ba3b5\\' text-anchor=\\'middle\\'%3ESem Rosto%3C/text%3E%3C/svg%3E';">
+                  <div class="play-overlay">▶</div>
+                </div>`;
+           } else {
+              thumbContent = `
+                <div class="snap-box" title="Ver Mídia" onclick="openModal('/snapshots/${item.raw.image_path}')">
+                  <img src="/snapshots/${item.raw.image_path}" alt="Snapshot RTSP"/>
+                </div>`;
+           }
+        }
+        return `
+        <div class="report-item">
+          <div style="display: flex; align-items: center; gap: 16px; flex: 1;">
+            <div class="dot"></div>
+            <div>
+              <div class="report-time">${item.timeStr}</div>
+              <div class="report-date">${item.dateStr}</div>
+            </div>
+          </div>
+          ${thumbContent}
+        </div>
+      `}).join('');
+    }
+
+    // Filtragem local
+    const searchInput = document.getElementById('search-input');
+    let searchPool = null;
+    
+    searchInput.addEventListener('input', async (event) => {
+      const term = event.target.value.toLowerCase().trim();
+      const btnMore = document.getElementById('btn-more');
+      const btnAdv = document.getElementById('btn-adv');
+      
+      if (!term) {
+        isSearchActive = false;
+        renderList(allMovements);
+        btnMore.style.display = 'block';
+        btnAdv.style.display = 'none';
+        return;
+      }
+
+      isSearchActive = true;
+      btnMore.style.display = 'none';
+      
+      if (!searchPool) {
+         try {
+            const response = await fetch(`/api/sensors/movements?sensor_id=${encodeURIComponent(sensorId)}&limit=100&offset=0`);
+            const data = await response.json();
+            if (data.ok && data.movements) {
+               searchPool = data.movements.map(mov => {
+                 const dt = new Date(mov.occurred_at);
+                 return {
+                   raw: mov,
+                   timeStr: dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                   dateStr: dt.toLocaleDateString('pt-BR')
+                 };
+               });
+            } else {
+               searchPool = allMovements;
+            }
+         } catch(e) {
+            searchPool = allMovements;
+         }
+      }
+
+      const filtered = (searchPool || allMovements).filter(item => 
+        item.timeStr.includes(term) || item.dateStr.includes(term)
+      );
+      
+      if (filtered.length === 0 && (!searchPool || !searchPool.isAdvanced)) {
+         btnAdv.style.display = 'inline-block';
+      } else {
+         btnAdv.style.display = 'none';
+      }
+      
+      renderList(filtered);
+    });
+
+    async function deepSearch500() {
+      const btnAdv = document.getElementById('btn-adv');
+      const originalText = btnAdv.innerHTML;
+      btnAdv.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Consultando DB...';
+      btnAdv.disabled = true;
+
+      try {
+        const response = await fetch(`/api/sensors/movements?sensor_id=${encodeURIComponent(sensorId)}&limit=500&offset=0`);
+        const data = await response.json();
+        if (data.ok && data.movements) {
+           searchPool = data.movements.map(mov => {
+             const dt = new Date(mov.occurred_at);
+             return {
+               raw: mov,
+               timeStr: dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+               dateStr: dt.toLocaleDateString('pt-BR')
+             };
+           });
+           searchPool.isAdvanced = true;
+           
+           isSearchActive = true;
+           document.getElementById('btn-more').style.display = 'none';
+           renderList(searchPool);
+           
+           // Apply current filter if any
+           const term = searchInput.value.toLowerCase().trim();
+           if (term) {
+             const filtered = searchPool.filter(item => 
+               item.timeStr.includes(term) || item.dateStr.includes(term)
+             );
+             renderList(filtered);
+           }
+        }
+      } catch(e) {
+        console.error(e);
+      } finally {
+        btnAdv.innerHTML = originalText;
+        btnAdv.disabled = false;
+        btnAdv.style.display = 'none';
+      }
+    }
+
+    function openModal(url) {
+      const modal = document.getElementById('video-modal');
+      const player = document.getElementById('modal-video-player');
+      player.src = url;
+      modal.classList.add('active');
+    }
+
+    function closeModal() {
+      const modal = document.getElementById('video-modal');
+      const player = document.getElementById('modal-video-player');
+      modal.classList.remove('active');
+      player.pause();
+      player.src = '';
+    }
+
+    document.getElementById('video-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'video-modal') {
+        closeModal();
+      }
+    });
+
+    loadReport();
+  </script>
+</body>
+</html>

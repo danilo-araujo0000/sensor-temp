@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import uuid
+import mimetypes
+import cv2
+import subprocess
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -27,6 +32,9 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "sensor_events.db"
 DASHBOARD_HTML_PATH = BASE_DIR / "dashboard.html"
 SENSOR_DETAIL_HTML_PATH = BASE_DIR / "sensor_detail.html"
+SENSOR_REPORT_HTML_PATH = BASE_DIR / "sensor_report.html"
+SNAPSHOTS_DIR = BASE_DIR / "snapshots"
+SNAPSHOTS_DIR.mkdir(exist_ok=True)
 
 
 def app_now() -> datetime:
@@ -56,6 +64,13 @@ def init_db() -> None:
         ensure_column(conn, "sensors", "name", "TEXT")
         ensure_column(conn, "sensors", "icon", "TEXT")
         ensure_column(conn, "sensors", "enabled", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "sensors", "rtsp_url", "TEXT")
+        ensure_column(conn, "sensors", "schedule_mode", "TEXT DEFAULT 'always'")
+        ensure_column(conn, "sensors", "schedule_start", "TEXT DEFAULT '00:00'")
+        ensure_column(conn, "sensors", "schedule_end", "TEXT DEFAULT '23:59'")
+        ensure_column(conn, "sensors", "schedule_days", "TEXT DEFAULT '0,1,2,3,4,5,6'")
+        ensure_column(conn, "sensors", "schedule_alternate", "TEXT DEFAULT 'none'")
+        ensure_column(conn, "movements", "image_path", "TEXT")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_sensors_device
@@ -120,7 +135,8 @@ def fetch_sensor(sensor_id: str) -> sqlite3.Row | None:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             """
-            SELECT sensor_id, device_id, pin, name, icon, enabled, registered_at, updated_at
+            SELECT sensor_id, device_id, pin, name, icon, enabled, registered_at, updated_at, rtsp_url,
+                   schedule_mode, schedule_start, schedule_end, schedule_days, schedule_alternate
             FROM sensors
             WHERE sensor_id = ?
             """,
@@ -152,6 +168,39 @@ def coerce_bool(value: object) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "on", "yes", "enabled", "ativo"}
     return False
+
+
+def capture_and_save_frame(movement_id: int, rtsp_url: str) -> None:
+    try:
+        filename = f"clip_{movement_id}_{uuid.uuid4().hex[:8]}.mp4"
+        filepath = SNAPSHOTS_DIR / filename
+        
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-rtsp_transport", "tcp",
+            "-use_wallclock_as_timestamps", "1",
+            "-i", rtsp_url,
+            "-t", "21",
+            "-c:v", "libx264",
+            "-preset", "superfast",
+            "-crf", "28",
+            "-pix_fmt", "yuv420p",
+            "-r", "15",
+            "-an",
+            str(filepath),
+            "-vframes", "1",
+            "-q:v", "2",
+            str(filepath).replace(".mp4", ".jpg")
+        ]
+        
+        subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=40)
+        
+        if filepath.exists() and filepath.stat().st_size > 0:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute("UPDATE movements SET image_path = ? WHERE id = ?", (filename, movement_id))
+                conn.commit()
+    except Exception as e:
+        print(f"RTSP FFmpeg Capture Error: {e}", flush=True)
 
 
 def upsert_sensors(payload: dict) -> dict:
@@ -253,6 +302,31 @@ def update_sensor_name(sensor_id: str, name: str) -> dict | None:
     }
 
 
+def update_sensor_schedule(payload: dict) -> dict | None:
+    sensor_id = str(payload.get("sensor_id", "")).strip()
+    if fetch_sensor(sensor_id) is None:
+        return None
+        
+    mode = str(payload.get("schedule_mode", "always"))
+    start = str(payload.get("schedule_start", "00:00"))
+    end = str(payload.get("schedule_end", "23:59"))
+    days = str(payload.get("schedule_days", "0,1,2,3,4,5,6"))
+    alt = str(payload.get("schedule_alternate", "none"))
+    
+    agora = app_now().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE sensors
+            SET schedule_mode=?, schedule_start=?, schedule_end=?, schedule_days=?, schedule_alternate=?, updated_at=?
+            WHERE sensor_id=?
+            """,
+            (mode, start, end, days, alt, agora, sensor_id)
+        )
+        conn.commit()
+    return dict(fetch_sensor(sensor_id))
+
+
 def set_all_sensors_enabled(enabled: bool) -> dict:
     agora = app_now().isoformat()
     with sqlite3.connect(DB_PATH) as conn:
@@ -300,6 +374,38 @@ def insert_movement(payload: dict) -> dict:
         }
 
     agora = app_now()
+    
+    # Schedule Logic
+    s_dict = dict(sensor)
+    mode = s_dict.get("schedule_mode") or "always"
+    if mode == "custom":
+        wd = str(agora.weekday())
+        days = s_dict.get("schedule_days") or "0,1,2,3,4,5,6"
+        if wd not in days.split(","):
+            return {"stored": False, "reason": "schedule_day_blocked", "sensor_id": sensor_id}
+            
+        alt = s_dict.get("schedule_alternate") or "none"
+        if alt == "even" and agora.day % 2 != 0:
+            return {"stored": False, "reason": "schedule_alternate_blocked", "sensor_id": sensor_id}
+        if alt == "odd" and agora.day % 2 == 0:
+            return {"stored": False, "reason": "schedule_alternate_blocked", "sensor_id": sensor_id}
+            
+        start_str = s_dict.get("schedule_start") or "00:00"
+        end_str = s_dict.get("schedule_end") or "23:59"
+        cur_mins = agora.hour * 60 + agora.minute
+        
+        def to_m(t):
+            p = t.split(":")
+            return int(p[0])*60 + int(p[1]) if len(p) == 2 else 0
+            
+        s_mins, e_mins = to_m(start_str), to_m(end_str)
+        if s_mins <= e_mins:
+            if not (s_mins <= cur_mins <= e_mins):
+                return {"stored": False, "reason": "schedule_time_blocked", "sensor_id": sensor_id}
+        else:
+            if not (cur_mins >= s_mins or cur_mins <= e_mins):
+                return {"stored": False, "reason": "schedule_time_blocked", "sensor_id": sensor_id}
+
     agora_epoch = int(agora.timestamp())
     ocorrido_em = agora.isoformat()
     ultimo = fetch_last_movement(sensor_id)
@@ -316,14 +422,22 @@ def insert_movement(payload: dict) -> dict:
         }
 
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO movements (sensor_id, device_id, occurred_at, occurred_epoch)
             VALUES (?, ?, ?, ?)
             """,
             (sensor_id, sensor["device_id"], ocorrido_em, agora_epoch),
         )
+        movement_id = cursor.lastrowid
         conn.commit()
+
+    if dict(sensor).get("rtsp_url"):
+        threading.Thread(
+            target=capture_and_save_frame,
+            args=(movement_id, sensor["rtsp_url"]),
+            daemon=True
+        ).start()
 
     return {
         "stored": True,
@@ -342,6 +456,7 @@ def list_sensors(limit: int) -> list[dict]:
                 s.sensor_id,
                 s.device_id,
                 s.pin,
+                s.rtsp_url,
                 COALESCE(s.name, s.sensor_id) AS name,
                 COALESCE(s.icon, 'motion') AS icon,
                 s.enabled,
@@ -388,6 +503,22 @@ def list_movements(limit: int) -> list[dict]:
             LIMIT ?
             """,
             (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_sensor_movements(sensor_id: str, limit: int, offset: int = 0) -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, occurred_at, image_path
+            FROM movements
+            WHERE sensor_id = ?
+            ORDER BY occurred_epoch DESC
+            LIMIT ? OFFSET ?
+            """,
+            (sensor_id, limit, offset),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -466,6 +597,12 @@ def get_sensor_detail(sensor_id: str, range_key: str) -> dict | None:
             "name": sensor_dict["name"] or default_sensor_name(sensor_dict["sensor_id"]),
             "icon": sensor_dict["icon"] or default_sensor_icon(sensor_dict["sensor_id"]),
             "enabled": sensor_dict["enabled"],
+            "rtsp_url": sensor_dict.get("rtsp_url", ""),
+            "schedule_mode": sensor_dict.get("schedule_mode", "always"),
+            "schedule_start": sensor_dict.get("schedule_start", "00:00"),
+            "schedule_end": sensor_dict.get("schedule_end", "23:59"),
+            "schedule_days": sensor_dict.get("schedule_days", "0,1,2,3,4,5,6"),
+            "schedule_alternate": sensor_dict.get("schedule_alternate", "none"),
             "status_label": status_label,
             "tone": tone,
             "registered_at": sensor_dict["registered_at"],
@@ -598,6 +735,12 @@ def load_sensor_detail_html() -> str:
     return "<html><body><h1>Detalhe indisponivel</h1></body></html>"
 
 
+def load_sensor_report_html() -> str:
+    if SENSOR_REPORT_HTML_PATH.exists():
+        return SENSOR_REPORT_HTML_PATH.read_text(encoding="utf-8")
+    return "<html><body><h1>Relatorio indisponivel</h1></body></html>"
+
+
 class SensorHubHandler(BaseHTTPRequestHandler):
     server_version = "SensorHubAPI/3.0"
 
@@ -639,6 +782,20 @@ class SensorHubHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self._send_html(HTTPStatus.OK, load_dashboard_html())
             return
+            
+        if parsed.path.startswith("/snapshots/"):
+            filename = parsed.path.replace("/snapshots/", "", 1)
+            filepath = SNAPSHOTS_DIR / filename
+            if filepath.exists() and filepath.is_file():
+                self.send_response(HTTPStatus.OK)
+                mt, _ = mimetypes.guess_type(str(filepath))
+                self.send_header("Content-Type", mt or "image/jpeg")
+                self.end_headers()
+                with open(filepath, "rb") as f:
+                    self.wfile.write(f.read())
+            else:
+                self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
+            return
 
         if parsed.path == "/sensor":
             sensor_id = params.get("sensor_id", [""])[0].strip()
@@ -646,6 +803,14 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "sensor_id_required"})
             else:
                 self._send_html(HTTPStatus.OK, load_sensor_detail_html())
+            return
+
+        if parsed.path == "/report":
+            sensor_id = params.get("sensor_id", [""])[0].strip()
+            if not sensor_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "sensor_id_required"})
+            else:
+                self._send_html(HTTPStatus.OK, load_sensor_report_html())
             return
 
         if parsed.path == "/health":
@@ -663,6 +828,52 @@ class SensorHubHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/dashboard":
             self._send_json(HTTPStatus.OK, build_dashboard_payload())
+            return
+
+        if parsed.path == "/api/sensors/movements":
+            sensor_id = params.get("sensor_id", [""])[0].strip()
+            if not sensor_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "sensor_id_required"})
+                return
+            
+            limit = parse_limit(parsed.query, 10)
+            offset_str = params.get("offset", ["0"])[0]
+            offset = int(offset_str) if offset_str.isdigit() else 0
+            
+            moves = list_sensor_movements(sensor_id, limit, offset)
+            self._send_json(HTTPStatus.OK, {"ok": True, "movements": moves})
+            return
+
+        if parsed.path == "/api/sensors/test_rtsp":
+            url = params.get("rtsp_url", [""])[0].strip()
+            if not url:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "rtsp_url_required"})
+                return
+
+            try:
+                cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+                if not cap.isOpened():
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "camera_unreachable"})
+                    return
+                # ler 1 frame com timeout limitrofe nativo
+                ret, frame = cap.read()
+                cap.release()
+                if ret:
+                    success, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                    if success:
+                        self.send_response(HTTPStatus.OK)
+                        self.send_header("Content-Type", "image/jpeg")
+                        self.end_headers()
+                        self.wfile.write(buffer.tobytes())
+                        return
+                    else:
+                        self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": "encode_failed"})
+                        return
+                else:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "no_frame"})
+                    return
+            except Exception as e:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(e)})
             return
 
         if parsed.path == "/api/sensors/detail":
@@ -755,6 +966,34 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "sensor_not_found"})
             else:
                 self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            return
+
+        if parsed.path == "/api/sensors/rtsp":
+            sensor_id = str(payload.get("sensor_id", "")).strip()
+            rtsp_url = str(payload.get("rtsp_url", "")).strip()
+            if not sensor_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "sensor_id_required"})
+                return
+            
+            agora = app_now().isoformat()
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    "UPDATE sensors SET rtsp_url = ?, updated_at = ? WHERE sensor_id = ?",
+                    (rtsp_url, agora, sensor_id),
+                )
+                conn.commit()
+            self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+
+        if parsed.path == "/api/sensors/schedule":
+            try:
+                result = update_sensor_schedule(payload)
+                if result is None:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "sensor_not_found"})
+                else:
+                    self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            except Exception as e:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(e)})
             return
 
         if parsed.path == "/api/system/state":

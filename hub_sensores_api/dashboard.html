@@ -124,7 +124,7 @@
 
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
       gap: 24px;
     }
 
@@ -386,18 +386,92 @@
     }
 
     @media (max-width: 760px) {
-      .grid { grid-template-columns: 1fr; }
-      .page-header h1 { font-size: 2.2rem; }
-      .card { padding: 20px; }
+      body { padding: 16px 12px; }
+      .grid { grid-template-columns: 1fr; gap: 16px; }
+      .page-header h1 { font-size: 2rem; }
+      .page-header p { font-size: 1rem; }
+      .card { padding: 18px; border-radius: 18px; }
+      #btn-config { position: static !important; display: inline-block; margin-top: 10px; width: 100%; text-align: center; }
+      .modal-content { padding: 16px; width: 95%; border-radius: 16px; }
+      .config-inputs { flex-direction: column; }
+      .config-inputs .btn-save, .config-inputs .btn-test { width: 100%; }
+      .card-header { flex-direction: column; align-items: flex-start; gap: 12px; }
     }
+
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(8px);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000; opacity: 0; pointer-events: none; transition: opacity 0.3s;
+    }
+    .modal-overlay.active { opacity: 1; pointer-events: auto; }
+    .modal-content {
+      background: var(--panel); border: 1px solid var(--panel-border);
+      border-radius: 20px; padding: 24px; width: 90%; max-width: 650px;
+      max-height: 90vh; overflow-y: auto;
+    }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+    .modal-header h2 { margin: 0; font-size: 1.5rem; }
+    .btn-close { background: transparent; border: none; color: var(--text-muted); font-size: 2rem; cursor: pointer; }
+    
+    .config-row {
+      background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px; padding: 16px; margin-bottom: 16px;
+    }
+    .config-row h3 { margin: 0 0 12px 0; font-size: 1.1rem; display: flex; align-items: center; gap: 8px;}
+    .config-inputs { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    .config-inputs input { flex: 1; min-width: 200px; padding: 10px 12px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; color: #fff; font-family: monospace;}
+    .config-inputs input:focus { outline: none; border-color: var(--blue); }
+    .config-inputs button { padding: 10px 16px; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; color: #fff; transition: opacity 0.2s;}
+    .config-inputs button:hover { opacity: 0.8; }
+    .btn-save { background: var(--blue); }
+    .btn-test { background: var(--gray); color: #fff; }
+    .test-preview { width: 100%; border-radius: 8px; margin-top: 8px; display: none; border: 1px solid rgba(255,255,255,0.1); }
+
+    details.config-group {
+      background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px; margin-bottom: 16px; 
+    }
+    details.config-group summary {
+      padding: 16px; font-weight: 600; font-size: 1.2rem; cursor: pointer; list-style: none;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    details.config-group summary::-webkit-details-marker { display: none; }
+    details.config-group summary::after {
+      content: "▼"; font-size: 0.9rem; color: var(--text-muted); transition: transform 0.2s;
+    }
+    details.config-group[open] summary::after { transform: rotate(180deg); }
+    .config-group-content { padding: 0 16px 16px 16px; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <header class="page-header">
+    <header class="page-header" style="position: relative;">
       <h1>Motion Hub</h1>
       <p>Real-Time Sensors Dashboard</p>
+      <button id="btn-config" class="details-link" style="position: absolute; top: 0; right: 0; background: rgba(79, 117, 255, 0.2); border-color: rgba(79, 117, 255, 0.5); cursor: pointer; font-family: 'Outfit'; font-size: 1rem;">⚙️ Configurações</button>
     </header>
+
+    <div id="config-modal" class="modal-overlay">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Configurações do Sistema</h2>
+          <button id="btn-close-config" class="btn-close">&times;</button>
+        </div>
+        
+        <details class="config-group" open>
+          <summary>📹 Câmeras de Vigilância</summary>
+          <div class="config-group-content" id="config-list">Carregando câmeras...</div>
+        </details>
+        
+        <details class="config-group">
+          <summary>⚙️ Preferências Gerais</summary>
+          <div class="config-group-content">
+            <p style="color:var(--text-muted)">Opções do motor e tempos de timeout em breve.</p>
+          </div>
+        </details>
+      </div>
+    </div>
     <main id="cards" class="grid"></main>
   </div>
 
@@ -542,6 +616,87 @@
 
     loadDashboard();
     setInterval(loadDashboard, 5000);
+
+    // Modal global config logic
+    const configModal = document.getElementById('config-modal');
+    document.getElementById('btn-config').addEventListener('click', async () => {
+      configModal.classList.add('active');
+      const listEl = document.getElementById('config-list');
+      listEl.innerHTML = '<div style="text-align:center; color:var(--text-muted);">Carregando sensores...</div>';
+      try {
+        const res = await fetch('/sensors');
+        const data = await res.json();
+        listEl.innerHTML = data.sensors.map(s => `
+          <div class="config-row">
+            <h3><span class="dot tone-${s.enabled?'active':'inactive'}"></span> ${s.name} <small style="color:var(--text-muted);font-weight:300">(${s.sensor_id})</small></h3>
+            <div class="config-inputs">
+              <input type="text" id="rtsp-${s.sensor_id}" placeholder="rtsp://admin:123456@192.168.1.100/stream" value="${s.rtsp_url || ''}">
+              <button class="btn-save" onclick="saveRtsp('${s.sensor_id}')">Salvar</button>
+              <button class="btn-test" onclick="testRtsp('${s.sensor_id}')">Testar</button>
+            </div>
+            <div id="feedback-${s.sensor_id}" style="font-size: 0.85rem; margin-bottom: 8px; min-height: 20px;"></div>
+            <img id="img-${s.sensor_id}" class="test-preview" src="">
+          </div>
+        `).join('');
+      } catch(e) {
+        listEl.innerHTML = '<div style="text-align:center; color:var(--danger);">Erro ao carregar câmeras da central.</div>';
+      }
+    });
+
+    document.getElementById('btn-close-config').addEventListener('click', () => {
+      configModal.classList.remove('active');
+    });
+
+    configModal.addEventListener('click', (e) => {
+      if (e.target === configModal) {
+        configModal.classList.remove('active');
+      }
+    });
+
+    window.saveRtsp = async (sensorId) => {
+      const url = document.getElementById(`rtsp-${sensorId}`).value.trim();
+      const fb = document.getElementById(`feedback-${sensorId}`);
+      fb.textContent = 'Salvando...'; fb.style.color = 'var(--text-muted)';
+      try {
+        const res = await fetch('/api/sensors/rtsp', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ sensor_id: sensorId, rtsp_url: url })
+        });
+        if(res.ok) { fb.style.color='var(--green)'; fb.textContent = 'URL RTSP atualizada!'; }
+        else { fb.style.color='var(--danger)'; fb.textContent = 'Erro de API ao gravar.'; }
+      } catch(e) {
+        fb.style.color='var(--danger)'; fb.textContent = 'Falha crítica de rede.';
+      }
+      setTimeout(()=>fb.textContent='', 4000);
+    };
+
+    window.testRtsp = (sensorId) => {
+      const url = document.getElementById(`rtsp-${sensorId}`).value.trim();
+      const fb = document.getElementById(`feedback-${sensorId}`);
+      const img = document.getElementById(`img-${sensorId}`);
+      if(!url) {
+        fb.style.color='var(--orange)'; fb.textContent = 'Insira um endereço RTSP na caixa primeiro!';
+        setTimeout(()=>fb.textContent='', 3000);
+        return;
+      }
+      fb.style.color='var(--blue)'; fb.textContent = '⚙️ Conectando na câmera e extraindo frame (Aguarde alguns segundos)...';
+      img.style.display = 'none';
+      img.src = '';
+      
+      const testUrl = '/api/sensors/test_rtsp?rtsp_url=' + encodeURIComponent(url) + '&_t=' + Date.now();
+      
+      const newImg = new Image();
+      newImg.onload = () => {
+        fb.style.color='var(--green)'; fb.textContent = 'Câmera online! Imagem recebida em tempo real.';
+        img.src = testUrl;
+        img.style.display = 'block';
+      };
+      newImg.onerror = () => {
+        fb.style.color='var(--danger)'; fb.textContent = '❌ Falha ao conectar: URL incorreta, câmera off-line ou timeout.';
+      };
+      newImg.src = testUrl;
+    };
   </script>
 </body>
 </html>
