@@ -21,8 +21,8 @@
 #define ENC_DT 6
 #define ENC_SW 7
 
-const char* ssid = "Tablet";
-const char* password = "TABLET@admin2024";
+const char* ssid = "Danilo";
+const char* password = "996639078Dd*";
 
 Adafruit_GC9A01A tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
 OneWire oneWire(ONE_WIRE_BUS);
