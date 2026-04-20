@@ -1,12 +1,8 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include "esp_task_wdt.h"
+#include "config.local.h"
 
-constexpr char WIFI_SSID[] = "Danilo";
-constexpr char WIFI_PASSWORD[] = "996639078Dd*";
-constexpr char DEVICE_ID[] = "esp32s3-hub-01";
-// URL base da API local; altere apenas este valor se o IP/porta do servidor mudar.
-constexpr char url_default[] = "http://192.168.18.64:5080";
 constexpr char SENSOR_REGISTER_ROUTE[] = "/sensors/register";
 constexpr char MOVEMENT_ROUTE[] = "/movements";
 constexpr char HEALTH_ROUTE[] = "/health";
@@ -36,12 +32,7 @@ struct SensorConfig {
   bool lastState;
 };
 
-SensorConfig sensores[] = {
-  // pinSecundario e opcional. Quando os dois pinos disparam juntos, conta como um unico evento.
-  { "mov_entrada", 8, 9, LigacaoGpioGnd, false },
-  { "mov_sala", 17, PINO_SEM_SECUNDARIO, LigacaoGpioGnd, false },
-  { "mov_corredor", 18, PINO_SEM_SECUNDARIO, LigacaoGpioGnd, false }
-};
+#include "sensores_config.h"
 
 constexpr size_t TOTAL_SENSORES = sizeof(sensores) / sizeof(sensores[0]);
 

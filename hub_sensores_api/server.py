@@ -7,6 +7,7 @@ import uuid
 import mimetypes
 import cv2
 import subprocess
+import shutil
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -35,6 +36,21 @@ SENSOR_DETAIL_HTML_PATH = BASE_DIR / "templates" / "sensor_detail.html"
 SENSOR_REPORT_HTML_PATH = BASE_DIR / "templates" / "sensor_report.html"
 SNAPSHOTS_DIR = BASE_DIR / "snapshots"
 SNAPSHOTS_DIR.mkdir(exist_ok=True)
+
+
+def resolve_ffmpeg_bin() -> str:
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        return ffmpeg_path
+
+    winget_packages = Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet" / "Packages"
+    for candidate in winget_packages.glob("Gyan.FFmpeg_*/*/bin/ffmpeg.exe"):
+        return str(candidate)
+
+    return "ffmpeg"
+
+
+FFMPEG_BIN = resolve_ffmpeg_bin()
 
 
 def app_now() -> datetime:
@@ -70,7 +86,6 @@ def init_db() -> None:
         ensure_column(conn, "sensors", "schedule_end", "TEXT DEFAULT '23:59'")
         ensure_column(conn, "sensors", "schedule_days", "TEXT DEFAULT '0,1,2,3,4,5,6'")
         ensure_column(conn, "sensors", "schedule_alternate", "TEXT DEFAULT 'none'")
-        ensure_column(conn, "movements", "image_path", "TEXT")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_sensors_device
@@ -89,6 +104,7 @@ def init_db() -> None:
             )
             """
         )
+        ensure_column(conn, "movements", "image_path", "TEXT")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_movements_sensor_time
@@ -176,7 +192,7 @@ def capture_and_save_frame(movement_id: int, rtsp_url: str) -> None:
         filepath = SNAPSHOTS_DIR / filename
         
         ffmpeg_cmd = [
-            "ffmpeg", "-y",
+            FFMPEG_BIN, "-y",
             "-rtsp_transport", "tcp",
             "-use_wallclock_as_timestamps", "1",
             "-i", rtsp_url,
@@ -299,6 +315,44 @@ def update_sensor_name(sensor_id: str, name: str) -> dict | None:
         "sensor_id": sensor["sensor_id"],
         "name": sensor["name"],
         "updated_at": sensor["updated_at"],
+    }
+
+
+def delete_sensor(sensor_id: str) -> dict | None:
+    sensor = fetch_sensor(sensor_id)
+    if sensor is None:
+        return None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        image_rows = conn.execute(
+            """
+            SELECT image_path
+            FROM movements
+            WHERE sensor_id = ? AND image_path IS NOT NULL AND image_path != ''
+            """,
+            (sensor_id,),
+        ).fetchall()
+        cursor = conn.execute("DELETE FROM movements WHERE sensor_id = ?", (sensor_id,))
+        movements_deleted = cursor.rowcount
+        conn.execute("DELETE FROM sensors WHERE sensor_id = ?", (sensor_id,))
+        conn.commit()
+
+    media_deleted = 0
+    for row in image_rows:
+        media_path = SNAPSHOTS_DIR / row["image_path"]
+        for path in (media_path, media_path.with_suffix(".jpg")):
+            try:
+                if path.exists() and path.is_file():
+                    path.unlink()
+                    media_deleted += 1
+            except OSError as exc:
+                print(f"Falha ao remover midia {path}: {exc}", flush=True)
+
+    return {
+        "sensor_id": sensor_id,
+        "movements_deleted": movements_deleted,
+        "media_deleted": media_deleted,
     }
 
 
@@ -962,6 +1016,18 @@ class SensorHubHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
                 return
+            if result is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "sensor_not_found"})
+            else:
+                    self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            return
+
+        if parsed.path == "/api/sensors/delete":
+            sensor_id = str(payload.get("sensor_id", "")).strip()
+            if not sensor_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "sensor_id_required"})
+                return
+            result = delete_sensor(sensor_id)
             if result is None:
                 self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "sensor_not_found"})
             else:

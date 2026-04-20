@@ -62,6 +62,14 @@
       margin-bottom: 24px;
     }
 
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
     .back-link {
       color: var(--text);
       text-decoration: none;
@@ -173,6 +181,8 @@
 
     .btn.primary { background: var(--blue); color: #ffffff; border-color: transparent; }
     .btn.primary:hover { background: #5c81ff; box-shadow: 0 4px 12px var(--blue-glow); }
+    .btn.danger { background: rgba(239, 68, 68, 0.16); border-color: rgba(239, 68, 68, 0.45); color: #fecaca; }
+    .btn.danger:hover { background: rgba(239, 68, 68, 0.28); color: #ffffff; box-shadow: 0 4px 12px var(--danger-glow); }
 
     /* Pulses e Status */
     @keyframes pulse-gray {
@@ -408,6 +418,9 @@
     }
     @media (max-width: 600px) {
       body { padding: 16px 12px; }
+      .topbar { align-items: stretch; flex-direction: column; }
+      .topbar-actions { justify-content: stretch; }
+      .topbar-actions .btn, .back-link { width: 100%; text-align: center; }
       .header-card { padding: 18px; border-radius: 18px; }
       .meta-grid { grid-template-columns: 1fr; gap: 12px; }
       .title-input { font-size: 1.6rem; }
@@ -442,15 +455,27 @@
   <div class="wrap">
     <div class="topbar">
       <a href="/" class="back-link">Voltar ao dashboard</a>
-      <a id="btn-report" href="#" class="btn primary">Relatório Completo</a>
+      <div class="topbar-actions">
+        <a id="btn-report" href="#" class="btn primary">Relatório Completo</a>
+        <button id="btn-open-config" class="btn" type="button">Configuração</button>
+        <button id="delete-sensor" class="btn danger" type="button">Remover sensor</button>
+      </div>
     </div>
 
-    <!-- Modal de Agendamento -->
-    <div id="schedule-modal" class="modal-overlay">
+    <!-- Modal de Configuração -->
+    <div id="config-modal" class="modal-overlay">
       <div class="modal-content">
         <div class="modal-header">
-          <h2>📅 Regras de Agendamento</h2>
-          <button id="btn-close-sch" class="btn-close">&times;</button>
+          <h2>Configuração do Sensor</h2>
+          <button id="btn-close-config" class="btn-close">&times;</button>
+        </div>
+        <div class="form-group" style="margin-bottom:24px;">
+          <label>Nome do sensor</label>
+          <input id="sensor-name-input" class="form-control" type="text" value="" />
+        </div>
+        <div style="display:flex; justify-content:flex-end; align-items:center; gap: 12px; margin-bottom:24px;">
+          <span id="save-name-feedback" class="subline" style="margin:0;"></span>
+          <button id="save-name" class="btn primary" type="button">Salvar nome</button>
         </div>
         <div class="schedule-grid">
           <div class="form-group">
@@ -499,16 +524,11 @@
     <section class="header-card glass-panel" id="header-card">
       <div class="header-row">
         <div>
-          <input id="sensor-name" class="title-input" value="" />
+          <div id="sensor-name" class="title-input"></div>
           <div id="subline" class="subline">Carregando sensor...</div>
           <div id="status-line" class="status-line tone-inactive">
             <span class="dot tone-inactive"></span>
             <span>CARREGANDO</span>
-          </div>
-          <div class="save-row">
-            <button id="save-name" class="btn" type="button">Salvar nome</button>
-            <button id="btn-open-sch" class="btn" type="button">⚙️ Regras de Agendamento</button>
-            <span id="save-feedback" class="subline" style="margin:0;"></span>
           </div>
         </div>
         <div>
@@ -591,7 +611,11 @@
     function renderDetail(detail) {
       currentDetail = detail;
       document.title = `${detail.sensor.name} | Sensor Detail`;
-      document.getElementById('sensor-name').value = detail.sensor.name;
+      document.getElementById('sensor-name').textContent = detail.sensor.name;
+      const nameInput = document.getElementById('sensor-name-input');
+      if (document.activeElement !== nameInput) {
+        nameInput.value = detail.sensor.name;
+      }
       
       document.getElementById('subline').textContent = `${detail.sensor.sensor_id} · Atividade em ${detail.analysis.range}`;
       document.getElementById('last-detection').textContent = relativeTimeFromSeconds(detail.sensor.last_motion_ago_seconds);
@@ -668,8 +692,8 @@
     });
 
     document.getElementById('save-name').addEventListener('click', async () => {
-      const feedback = document.getElementById('save-feedback');
-      const name = document.getElementById('sensor-name').value.trim();
+      const feedback = document.getElementById('save-name-feedback');
+      const name = document.getElementById('sensor-name-input').value.trim();
       if (!name) {
         feedback.textContent = 'Informe um nome.';
         return;
@@ -684,6 +708,19 @@
         feedback.style.color = 'var(--danger)';
       }
       setTimeout(() => feedback.textContent = '', 3000);
+    });
+
+    document.getElementById('delete-sensor').addEventListener('click', async () => {
+      const sensorName = document.getElementById('sensor-name-input').value.trim() || document.getElementById('sensor-name').textContent.trim() || sensorId;
+      const confirmed = confirm(`Remover o sensor "${sensorName}" e todo o historico de movimentos? Esta acao nao pode ser desfeita.`);
+      if (!confirmed) return;
+
+      try {
+        await apiPost('/api/sensors/delete', { sensor_id: sensorId });
+        window.location.href = '/';
+      } catch (error) {
+        alert('Falha ao remover sensor.');
+      }
     });
 
     setInterval(() => {
@@ -728,7 +765,7 @@
         window.isScheduleEditing = false;
         await loadDetail(currentRange);
         setTimeout(() => {
-           document.getElementById('schedule-modal').classList.remove('active');
+           document.getElementById('config-modal').classList.remove('active');
         }, 1000); // Close automatically after 1s
       } catch (err) {
         fb.textContent = 'Erro ao salvar!';
@@ -737,17 +774,17 @@
       setTimeout(() => fb.textContent = '', 3000);
     });
 
-    document.getElementById('btn-open-sch').addEventListener('click', () => {
-      document.getElementById('schedule-modal').classList.add('active');
+    document.getElementById('btn-open-config').addEventListener('click', () => {
+      document.getElementById('config-modal').classList.add('active');
     });
 
-    document.getElementById('btn-close-sch').addEventListener('click', () => {
-      document.getElementById('schedule-modal').classList.remove('active');
+    document.getElementById('btn-close-config').addEventListener('click', () => {
+      document.getElementById('config-modal').classList.remove('active');
     });
 
-    document.getElementById('schedule-modal').addEventListener('click', (e) => {
-      if (e.target.id === 'schedule-modal') {
-        document.getElementById('schedule-modal').classList.remove('active');
+    document.getElementById('config-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'config-modal') {
+        document.getElementById('config-modal').classList.remove('active');
       }
     });
 
@@ -756,3 +793,4 @@
   </script>
 </body>
 </html>
+
