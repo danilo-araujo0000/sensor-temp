@@ -1,37 +1,98 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include "esp_task_wdt.h"
 
 constexpr char WIFI_SSID[] = "Danilo";
 constexpr char WIFI_PASSWORD[] = "996639078Dd*";
 constexpr char DEVICE_ID[] = "esp32s3-hub-01";
-constexpr char SENSOR_REGISTER_URL[] = "http://192.168.18.64:5080/sensors/register";
-constexpr char MOVEMENT_URL[] = "http://192.168.18.64:5080/movements";
+// URL base da API local; altere apenas este valor se o IP/porta do servidor mudar.
+constexpr char url_default[] = "http://192.168.18.64:5080";
+constexpr char SENSOR_REGISTER_ROUTE[] = "/sensors/register";
+constexpr char MOVEMENT_ROUTE[] = "/movements";
+constexpr char HEALTH_ROUTE[] = "/health";
 
 constexpr unsigned long WIFI_RETRY_MS = 10000;
 constexpr unsigned long SENSOR_POLL_MS = 25;
+// Se a rede ou a API ficarem indisponiveis por muito tempo, o ESP reinicia para sair de estados ruins.
+constexpr unsigned long WIFI_MAX_OFFLINE_MS = 5UL * 60UL * 1000UL;
+constexpr unsigned long HEALTH_CHECK_MS = 60UL * 1000UL;
+constexpr uint8_t HEALTH_MAX_FALHAS = 5;
+constexpr uint32_t WATCHDOG_TIMEOUT_SECONDS = 20;
+constexpr uint8_t PINO_SEM_SECUNDARIO = 255;
 
+
+enum TipoLigacao {
+  // Sensor fecha contato entre GPIO e 3V3; usa INPUT_PULLDOWN e ativo = HIGH.
+  LigacaoGpio3V3,
+  // Sensor fecha contato entre GPIO e GND; usa INPUT_PULLUP e ativo = LOW.
+  LigacaoGpioGnd
+};
 
 struct SensorConfig {
   const char* id;
-  const char* name;
-  const char* icon;
-  uint8_t pin;
-  bool activeHigh;
-  bool usePulldown;
+  uint8_t pinPrincipal;
+  uint8_t pinSecundario;
+  TipoLigacao ligacao;
   bool lastState;
 };
 
 SensorConfig sensores[] = {
-  { "mov_entrada", "Entrada Principal", "entry", 8, true, true, false },
-  { "mov_sala", "Sala de Estar", "sofa", 17, true, true, false },
-  { "mov_corredor", "Corredor", "hall", 18, true, true, false }
+  // pinSecundario e opcional. Quando os dois pinos disparam juntos, conta como um unico evento.
+  { "mov_entrada", 8, 9, LigacaoGpioGnd, false },
+  { "mov_sala", 17, PINO_SEM_SECUNDARIO, LigacaoGpioGnd, false },
+  { "mov_corredor", 18, PINO_SEM_SECUNDARIO, LigacaoGpioGnd, false }
 };
 
 constexpr size_t TOTAL_SENSORES = sizeof(sensores) / sizeof(sensores[0]);
 
 unsigned long ultimoWifiRetryMs = 0;
 unsigned long ultimoPollMs = 0;
+unsigned long wifiDesconectadoDesdeMs = 0;
+unsigned long ultimoHealthCheckMs = 0;
+uint8_t falhasHealth = 0;
 bool sensoresRegistrados = false;
+bool watchdogAtivo = false;
+
+void alimentarWatchdog() {
+  if (watchdogAtivo) {
+    esp_task_wdt_reset();
+  }
+}
+
+void delayComWatchdog(unsigned long duracaoMs) {
+  // Mantem o watchdog alimentado durante piscadas e esperas curtas.
+  unsigned long inicio = millis();
+  while (millis() - inicio < duracaoMs) {
+    alimentarWatchdog();
+    delay(20);
+  }
+}
+
+void reiniciarDispositivo(const char* motivo) {
+  Serial.print("Reiniciando: ");
+  Serial.println(motivo);
+  Serial.flush();
+  delay(100);
+  ESP.restart();
+}
+
+void setupWatchdog() {
+  // Reinicia automaticamente se a task principal travar e parar de alimentar o watchdog.
+  esp_task_wdt_config_t wdtConfig = {
+    .timeout_ms = WATCHDOG_TIMEOUT_SECONDS * 1000,
+    .idle_core_mask = 0,
+    .trigger_panic = true
+  };
+
+  esp_err_t err = esp_task_wdt_init(&wdtConfig);
+  if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
+    err = esp_task_wdt_add(NULL);
+  }
+
+  watchdogAtivo = err == ESP_OK || err == ESP_ERR_INVALID_STATE;
+  Serial.print("Watchdog: ");
+  Serial.println(watchdogAtivo ? "ativo" : "falha ao ativar");
+}
 
 void setLedColor(uint8_t red, uint8_t green, uint8_t blue) {
 #if defined(RGB_BUILTIN)
@@ -44,20 +105,47 @@ void setLedColor(uint8_t red, uint8_t green, uint8_t blue) {
 void piscarStatus(uint8_t red, uint8_t green, uint8_t blue, uint8_t repeticoes, unsigned long intervaloMs) {
   for (uint8_t i = 0; i < repeticoes; i++) {
     setLedColor(red, green, blue);
-    delay(intervaloMs);
+    delayComWatchdog(intervaloMs);
     setLedColor(0, 0, 0);
-    delay(intervaloMs);
+    delayComWatchdog(intervaloMs);
   }
 }
 
 void acenderStatus(uint8_t red, uint8_t green, uint8_t blue, unsigned long duracaoMs) {
   setLedColor(red, green, blue);
-  delay(duracaoMs);
+  delayComWatchdog(duracaoMs);
   setLedColor(0, 0, 0);
+}
+
+void piscarStatusPorDuracao(uint8_t red, uint8_t green, uint8_t blue, unsigned long duracaoMs, unsigned long intervaloMs) {
+  unsigned long inicio = millis();
+  while (millis() - inicio < duracaoMs) {
+    setLedColor(red, green, blue);
+    delayComWatchdog(intervaloMs);
+    setLedColor(0, 0, 0);
+    delayComWatchdog(intervaloMs);
+  }
 }
 
 String montarSensorId(const SensorConfig& sensor) {
   return String(DEVICE_ID) + ":" + String(sensor.id);
+}
+
+bool pinoEstaAtivo(uint8_t pin, TipoLigacao ligacao) {
+  bool leitura = digitalRead(pin);
+  return ligacao == LigacaoGpio3V3 ? leitura == HIGH : leitura == LOW;
+}
+
+bool sensorEstaAtivo(const SensorConfig& sensor) {
+  bool principalAtivo = pinoEstaAtivo(sensor.pinPrincipal, sensor.ligacao);
+  bool secundarioAtivo = false;
+
+  if (sensor.pinSecundario != PINO_SEM_SECUNDARIO) {
+    secundarioAtivo = pinoEstaAtivo(sensor.pinSecundario, sensor.ligacao);
+  }
+
+  // Redundancia: qualquer pino ativo indica movimento, sem duplicar evento.
+  return principalAtivo || secundarioAtivo;
 }
 
 bool postJson(const char* url, const String& payload, int& httpCode, String& resposta) {
@@ -79,6 +167,35 @@ bool postJson(const char* url, const String& payload, int& httpCode, String& res
   return true;
 }
 
+String montarUrl(const char* rota) {
+  return String(url_default) + rota;
+}
+
+bool verificarHealthBackend() {
+  // Confirma que a API local continua respondendo; falhas repetidas reiniciam o ESP.
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  HTTPClient http;
+  if (!http.begin(montarUrl(HEALTH_ROUTE))) {
+    return false;
+  }
+
+  http.setTimeout(3000);
+  int httpCode = http.GET();
+  String resposta = http.getString();
+  http.end();
+
+  Serial.print("GET health -> HTTP ");
+  Serial.println(httpCode);
+  if (resposta.length()) {
+    Serial.println(resposta);
+  }
+
+  return httpCode >= 200 && httpCode < 300;
+}
+
 bool registrarSensoresNoBackend() {
   String payload = "{";
   payload += "\"device_id\":\"" + String(DEVICE_ID) + "\",";
@@ -88,9 +205,7 @@ bool registrarSensoresNoBackend() {
     if (i > 0) payload += ",";
     payload += "{";
     payload += "\"sensor_id\":\"" + montarSensorId(sensores[i]) + "\",";
-    payload += "\"pin\":" + String(sensores[i].pin) + ",";
-    payload += "\"name\":\"" + String(sensores[i].name) + "\",";
-    payload += "\"icon\":\"" + String(sensores[i].icon) + "\"";
+    payload += "\"pin\":" + String(sensores[i].pinPrincipal);
     payload += "}";
   }
 
@@ -98,7 +213,7 @@ bool registrarSensoresNoBackend() {
 
   int httpCode = 0;
   String resposta;
-  if (!postJson(SENSOR_REGISTER_URL, payload, httpCode, resposta)) {
+  if (!postJson(montarUrl(SENSOR_REGISTER_ROUTE).c_str(), payload, httpCode, resposta)) {
     return false;
   }
 
@@ -122,7 +237,7 @@ void conectarWifi() {
 
   unsigned long inicio = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - inicio < WIFI_RETRY_MS) {
-    delay(400);
+    delayComWatchdog(400);
     Serial.print(".");
   }
   Serial.println();
@@ -147,7 +262,7 @@ bool enviarEvento(const SensorConfig& sensor) {
   String payload = "{\"sensor_id\":\"" + montarSensorId(sensor) + "\"}";
   int httpCode = 0;
   String resposta;
-  if (!postJson(MOVEMENT_URL, payload, httpCode, resposta)) {
+  if (!postJson(montarUrl(MOVEMENT_ROUTE).c_str(), payload, httpCode, resposta)) {
     return false;
   }
 
@@ -163,21 +278,30 @@ bool enviarEvento(const SensorConfig& sensor) {
   return httpCode >= 200 && httpCode < 300;
 }
 
+void configurarPinoSensor(uint8_t pin, TipoLigacao ligacao) {
+  if (ligacao == LigacaoGpio3V3) {
+    pinMode(pin, INPUT_PULLDOWN);
+  } else {
+    pinMode(pin, INPUT_PULLUP);
+  }
+}
+
 void setupSensores() {
   for (size_t i = 0; i < TOTAL_SENSORES; i++) {
-    if (sensores[i].usePulldown) {
-      pinMode(sensores[i].pin, INPUT_PULLDOWN);
-    } else {
-      pinMode(sensores[i].pin, INPUT);
+    configurarPinoSensor(sensores[i].pinPrincipal, sensores[i].ligacao);
+
+    if (sensores[i].pinSecundario != PINO_SEM_SECUNDARIO) {
+      configurarPinoSensor(sensores[i].pinSecundario, sensores[i].ligacao);
     }
 
-    bool estadoBruto = digitalRead(sensores[i].pin);
-    sensores[i].lastState = sensores[i].activeHigh ? estadoBruto : !estadoBruto;
+    // Evita evento falso no boot: o primeiro estado vira a referencia inicial.
+    sensores[i].lastState = sensorEstaAtivo(sensores[i]);
   }
 }
 
 void setup() {
   Serial.begin(115200);
+  setupWatchdog();
 
 #if defined(RGB_BUILTIN)
   pinMode(RGB_BUILTIN, OUTPUT);
@@ -193,7 +317,18 @@ void setup() {
 }
 
 void loop() {
+  alimentarWatchdog();
   unsigned long agora = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (wifiDesconectadoDesdeMs == 0) {
+      wifiDesconectadoDesdeMs = agora;
+    } else if (agora - wifiDesconectadoDesdeMs >= WIFI_MAX_OFFLINE_MS) {
+      reiniciarDispositivo("WiFi offline por tempo limite");
+    }
+  } else {
+    wifiDesconectadoDesdeMs = 0;
+  }
 
   if (WiFi.status() != WL_CONNECTED && agora - ultimoWifiRetryMs >= WIFI_RETRY_MS) {
     ultimoWifiRetryMs = agora;
@@ -204,20 +339,29 @@ void loop() {
     registrarSensoresNoBackend();
   }
 
+  if (WiFi.status() == WL_CONNECTED && agora - ultimoHealthCheckMs >= HEALTH_CHECK_MS) {
+    ultimoHealthCheckMs = agora;
+    if (verificarHealthBackend()) {
+      falhasHealth = 0;
+    } else if (++falhasHealth >= HEALTH_MAX_FALHAS) {
+      reiniciarDispositivo("falhas consecutivas no health do backend");
+    }
+  }
+
   if (agora - ultimoPollMs < SENSOR_POLL_MS) {
     return;
   }
   ultimoPollMs = agora;
 
   for (size_t i = 0; i < TOTAL_SENSORES; i++) {
-    bool leituraBruta = digitalRead(sensores[i].pin);
-    bool movimentoAtivo = sensores[i].activeHigh ? leituraBruta : !leituraBruta;
+    bool movimentoAtivo = sensorEstaAtivo(sensores[i]);
+    // Evento so nasce na transicao sem movimento -> com movimento.
     bool bordaSubida = movimentoAtivo && !sensores[i].lastState;
 
     if (bordaSubida) {
       Serial.print("Movimento detectado em ");
       Serial.println(sensores[i].id);
-      acenderStatus(32, 0, 0, 3000);
+      piscarStatusPorDuracao(64, 0, 0, 3000, 150);
 
       if (enviarEvento(sensores[i])) {
         piscarStatus(0, 0, 32, 1, 80);
