@@ -83,10 +83,16 @@
     }
 
     /* Status pulses */
-    @keyframes pulse-green {
-      0% { box-shadow: 0 0 0 0 var(--green-glow); }
-      70% { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
-      100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+    @keyframes pulse-gray {
+      0% { box-shadow: 0 0 0 0 rgba(100, 116, 139, 0.4); }
+      70% { box-shadow: 0 0 0 8px rgba(100, 116, 139, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(100, 116, 139, 0); }
+    }
+
+    @keyframes pulse-blue {
+      0% { box-shadow: 0 0 0 0 var(--blue-glow); }
+      70% { box-shadow: 0 0 0 8px rgba(79, 117, 255, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(79, 117, 255, 0); }
     }
     
     @keyframes pulse-orange {
@@ -101,16 +107,17 @@
       border-radius: 50%;
     }
 
-    .tone-active { color: var(--green); }
+    .tone-active { color: var(--gray); }
     .tone-active .dot { 
-      background-color: var(--green);
-      animation: pulse-green 2s infinite; 
+      background-color: var(--gray);
+      animation: pulse-gray 2s infinite; 
     }
     
-    .tone-alert { color: var(--danger); }
+    .tone-alert { color: var(--blue); }
     .tone-alert .dot {
-      background-color: var(--danger);
-      box-shadow: 0 0 10px var(--danger);
+      background-color: var(--blue);
+      box-shadow: 0 0 10px var(--blue-glow);
+      animation: pulse-blue 2s infinite;
     }
     
     .tone-warning { color: var(--orange); }
@@ -162,8 +169,8 @@
       opacity: 0.6;
       transition: background 0.4s ease;
     }
-    .card.tone-active::before { background: radial-gradient(circle, rgba(34, 197, 94, 0.15), transparent 70%); }
-    .card.tone-alert::before { background: radial-gradient(circle, rgba(239, 68, 68, 0.2), transparent 70%); }
+    .card.tone-active::before { background: radial-gradient(circle, rgba(100, 116, 139, 0.1), transparent 70%); }
+    .card.tone-alert::before { background: radial-gradient(circle, rgba(79, 117, 255, 0.2), transparent 70%); }
     .card.tone-inactive::before { background: radial-gradient(circle, rgba(100, 116, 139, 0.1), transparent 70%); }
 
     .card-header {
@@ -194,8 +201,8 @@
       transition: color 0.3s ease, border-color 0.3s ease, background 0.3s ease;
     }
     
-    .card.tone-active .icon-box { color: var(--green); border-color: rgba(34, 197, 94, 0.3); background: rgba(34, 197, 94, 0.08); }
-    .card.tone-alert .icon-box { color: var(--danger); border-color: rgba(239, 68, 68, 0.3); background: rgba(239, 68, 68, 0.08); }
+    .card.tone-active .icon-box { color: var(--gray); border-color: rgba(100, 116, 139, 0.3); background: rgba(100, 116, 139, 0.08); }
+    .card.tone-alert .icon-box { color: var(--blue); border-color: rgba(79, 117, 255, 0.3); background: rgba(79, 117, 255, 0.08); }
 
     .icon-box svg {
       width: 26px;
@@ -331,12 +338,12 @@
     }
 
     .card.tone-active .bar { 
-      background: var(--green); 
-      box-shadow: 0 0 16px var(--green-glow);
+      background: var(--gray); 
+      box-shadow: 0 0 16px rgba(100, 116, 139, 0.2);
     }
     .card.tone-alert .bar { 
-      background: var(--danger);
-      box-shadow: 0 0 16px var(--danger-glow);
+      background: var(--blue);
+      box-shadow: 0 0 16px var(--blue-glow);
     }
     .card.tone-inactive .bar { background: rgba(255, 255, 255, 0.1); }
 
