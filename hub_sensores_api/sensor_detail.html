@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sensor Detail - Motion Hub</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0a0b10;
+      --bg-gradient-1: rgba(59, 99, 255, 0.15);
+      --bg-gradient-2: rgba(147, 51, 234, 0.15);
+      --bg-gradient-3: rgba(34, 182, 120, 0.1);
+      
+      --panel: rgba(20, 22, 35, 0.6);
+      --panel-border: rgba(255, 255, 255, 0.08);
+      
+      --text: #ffffff;
+      --text-muted: #9ba3b5;
+      
+      --blue: #4f75ff;
+      --green: #22c55e;
+      --orange: #f59e0b;
+      --danger: #ef4444;
+      --gray: #64748b;
+      
+      --blue-glow: rgba(79, 117, 255, 0.4);
+      --green-glow: rgba(34, 197, 94, 0.4);
+      --orange-glow: rgba(245, 158, 11, 0.4);
+      --danger-glow: rgba(239, 68, 68, 0.4);
+    }
+
+    * { box-sizing: border-box; }
+    
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background-color: var(--bg-dark);
+      background-image: 
+        radial-gradient(ellipse at top left, var(--bg-gradient-1), transparent 40%),
+        radial-gradient(ellipse at bottom right, var(--bg-gradient-2), transparent 40%),
+        radial-gradient(ellipse at bottom center, var(--bg-gradient-3), transparent 50%);
+      background-attachment: fixed;
+      color: var(--text);
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 30px 20px 40px;
+      line-height: 1.5;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .back-link {
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 600;
+      padding: 10px 18px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      transition: all 0.2s ease;
+    }
+    
+    .back-link:hover {
+      background: rgba(255, 255, 255, 0.1);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+
+    .glass-panel {
+      border-radius: 24px;
+      background: var(--panel);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--panel-border);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    }
+
+    .header-card {
+      padding: 30px;
+      margin-bottom: 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .header-card::before {
+      content: "";
+      position: absolute;
+      width: 250px;
+      height: 250px;
+      right: -80px;
+      top: -80px;
+      border-radius: 50%;
+      background: radial-gradient(circle, var(--bg-gradient-1), transparent 70%);
+      pointer-events: none;
+      transition: background 0.4s ease;
+    }
+    
+    .header-card.tone-active::before { background: radial-gradient(circle, rgba(34, 197, 94, 0.15), transparent 70%); }
+    .header-card.tone-alert::before { background: radial-gradient(circle, rgba(239, 68, 68, 0.2), transparent 70%); }
+
+    .header-row {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .title-input {
+      width: min(420px, 100%);
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      font-size: 2.5rem;
+      font-family: inherit;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      outline: none;
+      padding: 0;
+      margin-bottom: 4px;
+      border-bottom: 2px solid transparent;
+      transition: border-color 0.2s;
+    }
+    
+    .title-input:focus {
+      border-bottom: 2px solid var(--blue);
+    }
+
+    .subline {
+      color: var(--text-muted);
+      font-size: 1rem;
+      font-weight: 300;
+      margin-bottom: 16px;
+    }
+
+    .save-row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .btn {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 20px;
+      color: var(--text);
+      font-weight: 600;
+      cursor: pointer;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      transition: all 0.2s ease;
+      font-family: inherit;
+    }
+    
+    .btn:hover { background: rgba(255, 255, 255, 0.15); }
+
+    .btn.primary { background: var(--blue); color: #ffffff; border-color: transparent; }
+    .btn.primary:hover { background: #5c81ff; box-shadow: 0 4px 12px var(--blue-glow); }
+
+    /* Pulses e Status */
+    @keyframes pulse-green {
+      0% { box-shadow: 0 0 0 0 var(--green-glow); }
+      70% { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+    }
+    
+    @keyframes pulse-orange {
+      0% { box-shadow: 0 0 0 0 var(--orange-glow); }
+      70% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+    }
+
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 8px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .tone-active { color: var(--green); }
+    .tone-active .dot { background-color: var(--green); animation: pulse-green 2s infinite; }
+    .tone-alert { color: var(--danger); }
+    .tone-alert .dot { background-color: var(--danger); box-shadow: 0 0 10px var(--danger); }
+    .tone-warning { color: var(--orange); }
+    .tone-warning .dot { background-color: var(--orange); animation: pulse-orange 2s infinite; }
+    .tone-inactive { color: var(--gray); }
+    .tone-inactive .dot { background-color: var(--gray); }
+
+    /* Switch */
+    .switch {
+      position: relative;
+      width: 50px;
+      height: 28px;
+      flex: 0 0 auto;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute;
+      inset: 0;
+      cursor: pointer;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 999px;
+      transition: background 0.3s ease, border-color 0.3s ease;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .slider::before {
+      content: "";
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      left: 3px;
+      top: 3px;
+      border-radius: 50%;
+      background: #94a3b8;
+      transition: transform 0.3s cubic-bezier(0.4, 0.0, 0.2, 1), background 0.3s ease, box-shadow 0.3s ease;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+    }
+    .switch input:checked + .slider {
+      background: rgba(34, 197, 94, 0.15);
+      border-color: rgba(34, 197, 94, 0.4);
+    }
+    .switch input:checked + .slider::before {
+      transform: translateX(22px);
+      background: var(--green);
+      box-shadow: 0 0 12px var(--green-glow);
+    }
+
+    /* Grid Metricas */
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-top: 30px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .metric {
+      padding: 20px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.02);
+    }
+
+    .metric-label {
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .metric-value {
+      font-size: 1.8rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: #ffffff;
+    }
+
+    /* Layout Panel Grafico */
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 24px;
+    }
+
+    .panel {
+      padding: 28px;
+    }
+
+    .panel-title {
+      margin: 0 0 16px;
+      font-size: 1.5rem;
+      font-weight: 600;
+    }
+
+    .filter-row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+
+    .filter-btn {
+      border: 0;
+      border-radius: 999px;
+      padding: 8px 16px;
+      cursor: pointer;
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      transition: all 0.2s ease;
+      font-family: inherit;
+      font-weight: 600;
+    }
+
+    .filter-btn:hover { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+    .filter-btn.active { background: var(--blue); color: white; border-color: var(--blue); box-shadow: 0 4px 12px var(--blue-glow); }
+
+    /* Chart */
+    .chart {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 10px;
+      align-items: end;
+      min-height: 280px;
+      padding: 20px 0 10px;
+      border-top: 1px dashed rgba(255, 255, 255, 0.1);
+    }
+
+    .bar-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .bar {
+      width: 100%;
+      border-radius: 6px 6px 4px 4px;
+      min-height: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      transition: height 0.5s ease, background 0.4s ease, box-shadow 0.4s ease;
+    }
+
+    .tone-active .bar { background: var(--green); box-shadow: 0 0 16px var(--green-glow); }
+    .tone-alert .bar { background: var(--danger); box-shadow: 0 0 16px var(--danger-glow); }
+    .tone-inactive .bar { background: rgba(255, 255, 255, 0.1); }
+    
+    .bar.current {
+      outline: 2px solid rgba(255, 255, 255, 0.3);
+      outline-offset: 2px;
+    }
+
+    .bar-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-align: center;
+      font-weight: 300;
+    }
+
+    @media (max-width: 900px) {
+      .header-row { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <a href="/" class="back-link">Voltar ao dashboard</a>
+    </div>
+
+    <section class="header-card glass-panel" id="header-card">
+      <div class="header-row">
+        <div>
+          <input id="sensor-name" class="title-input" value="" />
+          <div id="subline" class="subline">Carregando sensor...</div>
+          <div id="status-line" class="status-line tone-inactive">
+            <span class="dot tone-inactive"></span>
+            <span>CARREGANDO</span>
+          </div>
+          <div class="save-row">
+            <button id="save-name" class="btn primary" type="button">Salvar nome</button>
+            <span id="save-feedback" class="subline" style="margin:0;"></span>
+          </div>
+        </div>
+        <div>
+          <label class="switch">
+            <input id="enabled-toggle" type="checkbox">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="meta-grid">
+        <div class="metric">
+          <div class="metric-label">Última detecção</div>
+          <div id="last-detection" class="metric-value">--</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Ocorrências no período</div>
+          <div id="range-count" class="metric-value">--</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Sensor</div>
+          <div id="sensor-code" class="metric-value">--</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="layout">
+      <article class="panel glass-panel">
+        <h2 class="panel-title">Gráfico de atividade</h2>
+        <div class="filter-row">
+          <button class="filter-btn" data-range="1h" type="button">1h</button>
+          <button class="filter-btn" data-range="12h" type="button">12h</button>
+          <button class="filter-btn active" data-range="24h" type="button">24h</button>
+        </div>
+        <div id="chart" class="chart"></div>
+      </article>
+    </section>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const sensorId = params.get('sensor_id');
+    let currentRange = '24h';
+    let currentDetail = null;
+
+    function relativeTimeFromSeconds(seconds) {
+      if (seconds == null) return 'Sem registro';
+      if (seconds < 60) return `${seconds}s atrás`;
+      if (seconds < 3600) return `${Math.floor(seconds / 60)}min atrás`;
+      if (seconds < 86400) return `${Math.floor(seconds / 3600)}h atrás`;
+      return `${Math.floor(seconds / 86400)}d atrás`;
+    }
+
+    function renderChart(detail) {
+      const chartEl = document.getElementById('chart');
+      const max = Math.max(...detail.analysis.series.map((item) => item.count), 1);
+      chartEl.innerHTML = detail.analysis.series.map((item) => {
+        const height = Math.max(12, Math.round((item.count / max) * 180));
+        return `
+          <div class="bar-wrap tone-${detail.sensor.tone}">
+            <div class="bar ${item.is_current ? 'current' : ''}" style="height:${height}px" title="${item.label}: ${item.count}"></div>
+            <div class="bar-label">${item.label}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function applyStatus(detail) {
+      const statusLine = document.getElementById('status-line');
+      statusLine.className = `status-line tone-${detail.sensor.tone}`;
+      statusLine.innerHTML = `<span class="dot tone-${detail.sensor.tone}"></span><span>${detail.sensor.status_label}</span>`;
+      document.getElementById('header-card').className = `header-card glass-panel tone-${detail.sensor.tone}`;
+    }
+
+    function renderDetail(detail) {
+      currentDetail = detail;
+      document.title = `${detail.sensor.name} | Sensor Detail`;
+      document.getElementById('sensor-name').value = detail.sensor.name;
+      document.getElementById('subline').textContent = `${detail.sensor.sensor_id} · Atividade em ${detail.analysis.range}`;
+      document.getElementById('last-detection').textContent = relativeTimeFromSeconds(detail.sensor.last_motion_ago_seconds);
+      document.getElementById('range-count').textContent = `${detail.analysis.total_movements}`;
+      document.getElementById('sensor-code').textContent = detail.sensor.sensor_id;
+      
+      const toggle = document.getElementById('enabled-toggle');
+      if (document.activeElement !== toggle) {
+        toggle.checked = detail.sensor.enabled;
+      }
+
+      document.querySelectorAll('.filter-btn').forEach((button) => {
+        button.classList.toggle('active', button.dataset.range === detail.analysis.range);
+      });
+      applyStatus(detail);
+      renderChart(detail);
+    }
+
+    async function loadDetail(rangeKey = currentRange) {
+      if (!sensorId) {
+        alert('sensor_id ausente.');
+        return;
+      }
+      currentRange = rangeKey;
+      const response = await fetch(`/api/sensors/detail?sensor_id=${encodeURIComponent(sensorId)}&range=${encodeURIComponent(rangeKey)}`);
+      const detail = await response.json();
+      if (!response.ok || !detail.ok) {
+        alert('Falha ao carregar o sensor.');
+        return;
+      }
+      renderDetail(detail);
+    }
+
+    async function apiPost(url, payload) {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok && !data.ok) {
+        throw new Error(data.error || 'request_failed');
+      }
+      return data;
+    }
+
+    document.querySelectorAll('.filter-btn').forEach((button) => {
+      button.addEventListener('click', () => loadDetail(button.dataset.range));
+    });
+
+    document.getElementById('enabled-toggle').addEventListener('change', async (event) => {
+      try {
+        await apiPost('/api/sensors/toggle', {
+          sensor_id: sensorId,
+          enabled: event.target.checked
+        });
+        await loadDetail(currentRange);
+      } catch (error) {
+        event.target.checked = !event.target.checked;
+        alert('Falha ao alterar estado do sensor.');
+      }
+    });
+
+    document.getElementById('save-name').addEventListener('click', async () => {
+      const feedback = document.getElementById('save-feedback');
+      const name = document.getElementById('sensor-name').value.trim();
+      if (!name) {
+        feedback.textContent = 'Informe um nome.';
+        return;
+      }
+      try {
+        await apiPost('/api/sensors/rename', { sensor_id: sensorId, name });
+        feedback.textContent = 'Nome salvo!';
+        feedback.style.color = 'var(--green)';
+        await loadDetail(currentRange);
+      } catch (error) {
+        feedback.textContent = 'Falha ao salvar.';
+        feedback.style.color = 'var(--danger)';
+      }
+      setTimeout(() => feedback.textContent = '', 3000);
+    });
+
+    setInterval(() => {
+      if (currentDetail) {
+        // Atualiza a visualização do tempo sem perder o foco na página ou dar flickering agressivo
+        document.getElementById('last-detection').textContent = relativeTimeFromSeconds(currentDetail.sensor.last_motion_ago_seconds == null ? null : currentDetail.sensor.last_motion_ago_seconds + 1);
+        if (currentDetail.sensor.last_motion_ago_seconds != null) {
+          currentDetail.sensor.last_motion_ago_seconds += 1;
+        }
+      }
+    }, 1000);
+
+    loadDetail();
+    setInterval(() => loadDetail(currentRange), 5000);
+  </script>
+</body>
+</html>

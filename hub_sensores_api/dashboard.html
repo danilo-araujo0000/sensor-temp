@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Motion Hub - Real-Time Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0a0b10;
+      --bg-gradient-1: rgba(59, 99, 255, 0.15);
+      --bg-gradient-2: rgba(147, 51, 234, 0.15);
+      --bg-gradient-3: rgba(34, 182, 120, 0.1);
+      
+      --panel: rgba(20, 22, 35, 0.6);
+      --panel-border: rgba(255, 255, 255, 0.08);
+      
+      --text: #ffffff;
+      --text-muted: #9ba3b5;
+      
+      --blue: #4f75ff;
+      --green: #22c55e;
+      --orange: #f59e0b;
+      --danger: #ef4444;
+      --gray: #64748b;
+      
+      --blue-glow: rgba(79, 117, 255, 0.4);
+      --green-glow: rgba(34, 197, 94, 0.4);
+      --orange-glow: rgba(245, 158, 11, 0.4);
+      --danger-glow: rgba(239, 68, 68, 0.4);
+    }
+
+    * { box-sizing: border-box; }
+    
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background-color: var(--bg-dark);
+      background-image: 
+        radial-gradient(ellipse at top left, var(--bg-gradient-1), transparent 40%),
+        radial-gradient(ellipse at bottom right, var(--bg-gradient-2), transparent 40%),
+        radial-gradient(ellipse at bottom center, var(--bg-gradient-3), transparent 50%);
+      background-attachment: fixed;
+      color: var(--text);
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      padding: 30px 20px;
+      line-height: 1.5;
+    }
+
+    .wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .page-header {
+      margin-bottom: 40px;
+      text-align: center;
+      animation: fadeInDown 0.8s ease-out;
+    }
+    
+    @keyframes fadeInDown {
+      from { opacity: 0; transform: translateY(-20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .page-header h1 {
+      font-size: 2.75rem;
+      font-weight: 700;
+      margin: 0 0 8px 0;
+      background: linear-gradient(135deg, #ffffff, #a5b4fc);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -0.02em;
+    }
+
+    .page-header p {
+      color: var(--text-muted);
+      margin: 0;
+      font-size: 1.15rem;
+      font-weight: 300;
+    }
+
+    /* Status pulses */
+    @keyframes pulse-green {
+      0% { box-shadow: 0 0 0 0 var(--green-glow); }
+      70% { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+    }
+    
+    @keyframes pulse-orange {
+      0% { box-shadow: 0 0 0 0 var(--orange-glow); }
+      70% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .tone-active { color: var(--green); }
+    .tone-active .dot { 
+      background-color: var(--green);
+      animation: pulse-green 2s infinite; 
+    }
+    
+    .tone-alert { color: var(--danger); }
+    .tone-alert .dot {
+      background-color: var(--danger);
+      box-shadow: 0 0 10px var(--danger);
+    }
+    
+    .tone-warning { color: var(--orange); }
+    .tone-warning .dot {
+      background-color: var(--orange);
+      animation: pulse-orange 2s infinite;
+    }
+    
+    .tone-inactive { color: var(--gray); }
+    .tone-inactive .dot { background-color: var(--gray); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 24px;
+    }
+
+    /* Glassmorphism Cards */
+    .card {
+      position: relative;
+      overflow: hidden;
+      border-radius: 24px;
+      background: var(--panel);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--panel-border);
+      padding: 24px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+      transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.4s ease, border-color 0.4s ease;
+    }
+
+    .card:hover {
+      transform: translateY(-8px);
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+
+    /* Subtle glow from back of the card */
+    .card::before {
+      content: "";
+      position: absolute;
+      width: 180px;
+      height: 180px;
+      right: -60px;
+      top: -60px;
+      border-radius: 50%;
+      background: radial-gradient(circle, var(--bg-gradient-1), transparent 70%);
+      pointer-events: none;
+      opacity: 0.6;
+      transition: background 0.4s ease;
+    }
+    .card.tone-active::before { background: radial-gradient(circle, rgba(34, 197, 94, 0.15), transparent 70%); }
+    .card.tone-alert::before { background: radial-gradient(circle, rgba(239, 68, 68, 0.2), transparent 70%); }
+    .card.tone-inactive::before { background: radial-gradient(circle, rgba(100, 116, 139, 0.1), transparent 70%); }
+
+    .card-header {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .sensor-meta {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .icon-box {
+      width: 52px;
+      height: 52px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: #cbd5e1;
+      box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.03);
+      transition: color 0.3s ease, border-color 0.3s ease, background 0.3s ease;
+    }
+    
+    .card.tone-active .icon-box { color: var(--green); border-color: rgba(34, 197, 94, 0.3); background: rgba(34, 197, 94, 0.08); }
+    .card.tone-alert .icon-box { color: var(--danger); border-color: rgba(239, 68, 68, 0.3); background: rgba(239, 68, 68, 0.08); }
+
+    .icon-box svg {
+      width: 26px;
+      height: 26px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .sensor-name {
+      margin: 0 0 6px 0;
+      font-size: 1.3rem;
+      font-weight: 600;
+      line-height: 1.2;
+      color: #ffffff;
+    }
+
+    .sensor-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    /* Switch styling for dark UI */
+    .switch {
+      position: relative;
+      width: 46px;
+      height: 26px;
+      flex: 0 0 auto;
+      margin-top: 4px;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      inset: 0;
+      cursor: pointer;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 999px;
+      transition: background 0.3s ease, border-color 0.3s ease;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .slider::before {
+      content: "";
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      left: 3px;
+      top: 3px;
+      border-radius: 50%;
+      background: #94a3b8;
+      transition: transform 0.3s cubic-bezier(0.4, 0.0, 0.2, 1), background 0.3s ease, box-shadow 0.3s ease;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+    }
+
+    .switch input:checked + .slider {
+      background: rgba(34, 197, 94, 0.15);
+      border-color: rgba(34, 197, 94, 0.4);
+    }
+
+    .switch input:checked + .slider::before {
+      transform: translateX(20px);
+      background: var(--green);
+      box-shadow: 0 0 12px var(--green-glow);
+    }
+    
+    .switch input:disabled + .slider {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .sensor-device {
+      margin-top: 18px;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 300;
+    }
+    
+    .sensor-device::before {
+      content: '';
+      display: inline-block;
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--gray);
+    }
+
+    .section-label {
+      position: relative;
+      z-index: 1;
+      margin-top: 28px;
+      margin-bottom: 12px;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    /* Glowing Bars */
+    .bars {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+      align-items: end;
+      height: 64px;
+      margin-bottom: 24px;
+    }
+
+    .bar {
+      position: relative;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.08);
+      min-height: 4px;
+      transition: height 0.5s cubic-bezier(0.4, 0, 0.2, 1), background 0.4s ease, box-shadow 0.4s ease;
+    }
+
+    .card.tone-active .bar { 
+      background: var(--green); 
+      box-shadow: 0 0 16px var(--green-glow);
+    }
+    .card.tone-alert .bar { 
+      background: var(--danger);
+      box-shadow: 0 0 16px var(--danger-glow);
+    }
+    .card.tone-inactive .bar { background: rgba(255, 255, 255, 0.1); }
+
+    .card-footer {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 16px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      font-weight: 300;
+    }
+
+    .details-link {
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 600;
+      padding: 6px 16px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      transition: all 0.2s ease;
+    }
+    
+    .details-link:hover {
+      background: rgba(255, 255, 255, 0.1);
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+
+    .empty {
+      grid-column: 1 / -1;
+      border-radius: 24px;
+      border: 2px dashed rgba(255, 255, 255, 0.1);
+      background: rgba(0, 0, 0, 0.2);
+      min-height: 300px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      color: var(--text-muted);
+      font-size: 1.1rem;
+    }
+
+    @media (max-width: 760px) {
+      .grid { grid-template-columns: 1fr; }
+      .page-header h1 { font-size: 2.2rem; }
+      .card { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="page-header">
+      <h1>Motion Hub</h1>
+      <p>Real-Time Sensors Dashboard</p>
+    </header>
+    <main id="cards" class="grid"></main>
+  </div>
+
+  <script>
+    const iconMap = {
+      entry: '<svg viewBox="0 0 24 24"><path d="M5 21V8l7-5 7 5v13"></path><path d="M9 21v-6h6v6"></path></svg>',
+      sofa: '<svg viewBox="0 0 24 24"><path d="M5 11V9a3 3 0 0 1 3-3h8a3 3 0 0 1 3 3v2"></path><path d="M4 11h16a2 2 0 0 1 2 2v4H2v-4a2 2 0 0 1 2-2Z"></path><path d="M4 17v2"></path><path d="M20 17v2"></path></svg>',
+      hall: '<svg viewBox="0 0 24 24"><path d="M7 21V5l5-2 5 2v16"></path><path d="M10 21v-6h4v6"></path><path d="M9 9h.01"></path><path d="M15 9h.01"></path></svg>',
+      garage: '<svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7"></path><path d="M5 10v9h14v-9"></path><path d="M8 14h8"></path><path d="M8 17h8"></path></svg>',
+      garden: '<svg viewBox="0 0 24 24"><path d="M12 21V10"></path><path d="M7 14c0-4 5-8 5-8s5 4 5 8a5 5 0 0 1-10 0Z"></path><path d="M5 21h14"></path></svg>',
+      motion: '<svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 1 0 8 8"></path><path d="M17 7l4-4"></path><path d="M15 3h6v6"></path></svg>'
+    };
+
+    const cardsEl = document.getElementById('cards');
+
+    function relativeTime(isoString) {
+      if (!isoString) return 'Sem movimento';
+      const then = new Date(isoString);
+      const diffSeconds = Math.max(0, Math.floor((Date.now() - then.getTime()) / 1000));
+      if (diffSeconds < 60) return `ha ${diffSeconds}s`;
+      if (diffSeconds < 3600) return `ha ${Math.floor(diffSeconds / 60)}min`;
+      return `ha ${Math.floor(diffSeconds / 3600)}h`;
+    }
+
+    function escapeHtml(value) {
+      return value
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function renderBars(bins, tone) {
+      const max = Math.max(...bins, 1);
+      return bins.map((count) => {
+        const height = Math.max(8, Math.round((count / max) * 54));
+        return `<span class="bar" style="height:${height}px"></span>`;
+      }).join('');
+    }
+
+    async function apiPost(url, payload) {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok && !data.ok) {
+        throw new Error(data.error || 'request_failed');
+      }
+      return data;
+    }
+
+    // Attach event listeners for a specific card toggle
+    function setupToggleListener(toggle) {
+      toggle.addEventListener('change', async (event) => {
+        const sensorId = event.target.getAttribute('data-sensor-id');
+        const enabled = event.target.checked;
+        event.target.disabled = true;
+        try {
+          await apiPost('/api/sensors/toggle', { sensor_id: sensorId, enabled });
+          await loadDashboard();
+        } catch (error) {
+          event.target.checked = !enabled;
+          alert('Falha ao alterar o sensor.');
+        } finally {
+          event.target.disabled = false;
+        }
+      });
+    }
+
+    async function loadDashboard() {
+      const response = await fetch('/api/dashboard');
+      const data = await response.json();
+
+      if (!data.sensors.length) {
+        cardsEl.innerHTML = '<div class="empty">Nenhum sensor registrado.</div>';
+        return;
+      }
+
+      // DOM diffing manual apenas para evitar piscadas com innerHTML total
+      if (cardsEl.children.length !== data.sensors.length || cardsEl.querySelector('.empty')) {
+        // Redesenho total se quantidade nao bater ou estado vazio
+        cardsEl.innerHTML = data.sensors.map((sensor) => `
+          <article class="card tone-${sensor.tone}">
+            <div class="card-header">
+              <div class="sensor-meta">
+                <div class="icon-box">${iconMap[sensor.icon] || iconMap.motion}</div>
+                <div>
+                  <h2 class="sensor-name">${escapeHtml(sensor.name)}</h2>
+                  <div class="sensor-status tone-${sensor.tone}">
+                    <span class="dot tone-${sensor.tone}"></span>
+                    <span>${sensor.status_label}</span>
+                  </div>
+                  <div class="sensor-device">Pino ${sensor.pin} &middot; ${escapeHtml(sensor.device_id)}</div>
+                </div>
+              </div>
+              <label class="switch">
+                <input type="checkbox" ${sensor.enabled ? 'checked' : ''} data-sensor-id="${escapeHtml(sensor.sensor_id)}">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="section-label">Recent Activity</div>
+            <div class="bars">${renderBars(sensor.recent_bins, sensor.tone)}</div>
+            <div class="card-footer">
+              <span>${relativeTime(sensor.last_motion_at)}</span>
+              <a class="details-link" href="/sensor?sensor_id=${encodeURIComponent(sensor.sensor_id)}">Detalhes</a>
+            </div>
+          </article>
+        `).join('');
+
+        cardsEl.querySelectorAll('input[data-sensor-id]').forEach(setupToggleListener);
+      } else {
+        // Modifica pontualmente os itens de um cartao existente
+        data.sensors.forEach((sensor, index) => {
+          const card = cardsEl.children[index];
+          
+          if (card.className !== `card tone-${sensor.tone}`) {
+            card.className = `card tone-${sensor.tone}`;
+          }
+          
+          card.querySelector('.sensor-name').textContent = sensor.name;
+          
+          const statusDiv = card.querySelector('.sensor-status');
+          statusDiv.className = `sensor-status tone-${sensor.tone}`;
+          statusDiv.querySelector('.dot').className = `dot tone-${sensor.tone}`;
+          statusDiv.querySelector('span:last-child').textContent = sensor.status_label;
+          
+          const checkbox = card.querySelector('input[data-sensor-id]');
+          if (document.activeElement !== checkbox) {
+            checkbox.checked = sensor.enabled;
+            checkbox.setAttribute('data-sensor-id', sensor.sensor_id);
+          }
+          
+          card.querySelector('.bars').innerHTML = renderBars(sensor.recent_bins, sensor.tone);
+          card.querySelector('.card-footer span').textContent = relativeTime(sensor.last_motion_at);
+        });
+      }
+    }
+
+    loadDashboard();
+    setInterval(loadDashboard, 5000);
+  </script>
+</body>
+</html>
