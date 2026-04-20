@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
+import time
 import uuid
 import mimetypes
 import cv2
@@ -31,12 +33,58 @@ DETAIL_RANGE_SECONDS = {
 DETAIL_BIN_COUNT = 12
 APP_TIMEZONE = timezone(timedelta(hours=-3))
 BASE_DIR = Path(__file__).resolve().parent
+ENV_PATH = BASE_DIR / ".env"
 DB_PATH = BASE_DIR / "sensor_events.db"
 DASHBOARD_HTML_PATH = BASE_DIR / "templates" / "dashboard.html"
 SENSOR_DETAIL_HTML_PATH = BASE_DIR / "templates" / "sensor_detail.html"
 SENSOR_REPORT_HTML_PATH = BASE_DIR / "templates" / "sensor_report.html"
 SNAPSHOTS_DIR = BASE_DIR / "snapshots"
 SNAPSHOTS_DIR.mkdir(exist_ok=True)
+
+
+def load_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            values[key] = value
+
+    return values
+
+
+ENV = load_env_file(ENV_PATH)
+
+
+def env_value(name: str, default: str) -> str:
+    return os.environ.get(name, ENV.get(name, default))
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(env_value(name, str(default)))
+    except ValueError:
+        return default
+
+
+def env_bool(name: str, default: bool) -> bool:
+    value = env_value(name, "true" if default else "false").strip().lower()
+    return value in {"1", "true", "yes", "on", "sim", "ativo", "enabled"}
+
+
+SNAPSHOTS_CLEANUP_ENABLED = env_bool("SNAPSHOTS_CLEANUP_ENABLED", True)
+SNAPSHOTS_CLEANUP_ON_START = env_bool("SNAPSHOTS_CLEANUP_ON_START", True)
+SNAPSHOTS_CLEANUP_INTERVAL_SECONDS = max(env_int("SNAPSHOTS_CLEANUP_INTERVAL_SECONDS", 3600), 60)
+SNAPSHOTS_RETENTION_DAYS = env_int("SNAPSHOTS_RETENTION_DAYS", 30)
+SNAPSHOTS_MAX_SIZE_MB = env_int("SNAPSHOTS_MAX_SIZE_MB", 2048)
+SNAPSHOT_MEDIA_EXTENSIONS = {".mp4", ".jpg", ".jpeg", ".png"}
 
 
 def resolve_ffmpeg_bin() -> str:
@@ -186,6 +234,132 @@ def coerce_bool(value: object) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "on", "yes", "enabled", "ativo"}
     return False
+
+
+def list_snapshot_media_files() -> list[Path]:
+    if not SNAPSHOTS_DIR.exists():
+        return []
+    return [
+        path
+        for path in SNAPSHOTS_DIR.iterdir()
+        if path.is_file() and path.suffix.lower() in SNAPSHOT_MEDIA_EXTENSIONS
+    ]
+
+
+def clear_deleted_media_references(deleted_names: list[str]) -> None:
+    video_names = [name for name in deleted_names if name.lower().endswith(".mp4")]
+    if not video_names:
+        return
+
+    placeholders = ",".join("?" for _ in video_names)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            f"UPDATE movements SET image_path = NULL WHERE image_path IN ({placeholders})",
+            video_names,
+        )
+        conn.commit()
+
+
+def cleanup_snapshots() -> dict:
+    now_ts = time.time()
+    retention_seconds = SNAPSHOTS_RETENTION_DAYS * 24 * 60 * 60
+    max_bytes = SNAPSHOTS_MAX_SIZE_MB * 1024 * 1024
+    deleted_names: list[str] = []
+    bytes_deleted = 0
+
+    def remove_file(path: Path) -> None:
+        nonlocal bytes_deleted
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            bytes_deleted += size
+            deleted_names.append(path.name)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"Falha ao remover snapshot {path.name}: {exc}", flush=True)
+
+    if SNAPSHOTS_RETENTION_DAYS > 0:
+        for path in list_snapshot_media_files():
+            try:
+                age_seconds = now_ts - path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if age_seconds > retention_seconds:
+                remove_file(path)
+
+    files_with_size: list[tuple[Path, int, float]] = []
+    total_bytes = 0
+    for path in list_snapshot_media_files():
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        files_with_size.append((path, stat.st_size, stat.st_mtime))
+        total_bytes += stat.st_size
+
+    if SNAPSHOTS_MAX_SIZE_MB > 0 and total_bytes > max_bytes:
+        for path, size, _mtime in sorted(files_with_size, key=lambda item: item[2]):
+            if total_bytes <= max_bytes:
+                break
+            remove_file(path)
+            total_bytes -= size
+
+    clear_deleted_media_references(deleted_names)
+
+    remaining_files = list_snapshot_media_files()
+    remaining_bytes = 0
+    for path in remaining_files:
+        try:
+            remaining_bytes += path.stat().st_size
+        except FileNotFoundError:
+            pass
+
+    return {
+        "ok": True,
+        "enabled": SNAPSHOTS_CLEANUP_ENABLED,
+        "retention_days": SNAPSHOTS_RETENTION_DAYS,
+        "max_size_mb": SNAPSHOTS_MAX_SIZE_MB,
+        "files_deleted": len(deleted_names),
+        "bytes_deleted": bytes_deleted,
+        "remaining_files": len(remaining_files),
+        "remaining_bytes": remaining_bytes,
+    }
+
+
+def cleanup_snapshots_worker() -> None:
+    while True:
+        time.sleep(SNAPSHOTS_CLEANUP_INTERVAL_SECONDS)
+        try:
+            result = cleanup_snapshots()
+            if result["files_deleted"]:
+                print(
+                    f"Limpeza de snapshots: {result['files_deleted']} arquivos removidos",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"Erro na limpeza de snapshots: {exc}", flush=True)
+
+
+def start_snapshot_cleanup() -> None:
+    if not SNAPSHOTS_CLEANUP_ENABLED:
+        print("Limpeza de snapshots desativada por .env", flush=True)
+        return
+
+    if SNAPSHOTS_CLEANUP_ON_START:
+        try:
+            result = cleanup_snapshots()
+            print(
+                "Limpeza inicial de snapshots: "
+                f"{result['files_deleted']} arquivos removidos, "
+                f"{result['remaining_files']} restantes",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"Erro na limpeza inicial de snapshots: {exc}", flush=True)
+
+    thread = threading.Thread(target=cleanup_snapshots_worker, daemon=True)
+    thread.start()
 
 
 def capture_and_save_frame(movement_id: int, rtsp_url: str) -> None:
@@ -922,6 +1096,10 @@ class SensorHubHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/system/cleanup":
+            self._send_json(HTTPStatus.OK, cleanup_snapshots())
+            return
+
         if parsed.path == "/api/dashboard":
             self._send_json(HTTPStatus.OK, build_dashboard_payload())
             return
@@ -1133,6 +1311,7 @@ class SensorHubHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     init_db()
+    start_snapshot_cleanup()
     server = ThreadingHTTPServer((HOST, PORT), SensorHubHandler)
     print(f"Servidor escutando em http://{HOST}:{PORT}", flush=True)
     print(f"Banco SQLite: {DB_PATH}", flush=True)
