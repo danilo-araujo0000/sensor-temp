@@ -10,6 +10,7 @@ constexpr char MOVEMENT_URL[] = "http://172.19.200.1:5080/movements";
 constexpr unsigned long WIFI_RETRY_MS = 10000;
 constexpr unsigned long SENSOR_POLL_MS = 25;
 
+
 struct SensorConfig {
   const char* id;
   const char* name;
