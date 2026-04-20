@@ -278,6 +278,55 @@
       z-index: 1;
     }
 
+    /* Snap Box and Video Modal */
+    .snap-box {
+      width: 120px;
+      height: 80px;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 2px solid rgba(255,255,255,0.1);
+      transition: transform 0.2s, border-color 0.2s;
+      flex-shrink: 0;
+      cursor: pointer;
+      position: relative;
+      background: #1a1a2e;
+    }
+    .snap-box:hover {
+      border-color: var(--blue);
+      transform: scale(1.05);
+    }
+    .snap-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .play-overlay {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.4); color: #fff; font-size: 1.5rem; opacity: 0.8; transition: opacity 0.2s;
+    }
+    .snap-box:hover .play-overlay { opacity: 1; color: var(--blue); }
+
+    .video-modal {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(10px);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 2000; opacity: 0; pointer-events: none; transition: opacity 0.3s;
+    }
+    .video-modal.active { opacity: 1; pointer-events: auto; }
+    .video-modal-content {
+      position: relative; width: 90%; max-width: 800px;
+      background: var(--panel); border: 1px solid var(--panel-border);
+      border-radius: 16px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    }
+    .video-modal-close {
+      position: absolute; top: 10px; right: 10px;
+      background: rgba(0,0,0,0.5); border: none; color: #fff; border-radius: 50%;
+      width: 36px; height: 36px; font-size: 1.5rem; cursor: pointer; z-index: 10;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .video-modal-close:hover { background: rgba(0,0,0,0.8); }
+    .video-modal video { width: 100%; display: block; max-height: 80vh; object-fit: contain; }
+
     .metric {
       padding: 20px;
       border-radius: 16px;
@@ -531,41 +580,44 @@
             <span>CARREGANDO</span>
           </div>
         </div>
-        <div>
-          <label class="switch">
-            <input id="enabled-toggle" type="checkbox">
-            <span class="slider"></span>
-          </label>
-        </div>
-      </div>
-
-      <div class="meta-grid">
-        <div class="metric">
-          <div class="metric-label">Última detecção</div>
-          <div id="last-detection" class="metric-value">--</div>
-        </div>
-        <div class="metric">
-          <div class="metric-label">Ocorrências no período</div>
-          <div id="range-count" class="metric-value">--</div>
-        </div>
-        <div class="metric">
-          <div class="metric-label">Sensor</div>
-          <div id="sensor-code" class="metric-value">--</div>
+        <div style="display:flex; gap: 24px; align-items:flex-start;">
+          <div id="last-snap-container"></div>
+          <div>
+            <label class="switch">
+              <input id="enabled-toggle" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
         </div>
       </div>
     </section>
 
+
+
     <section class="layout">
       <article class="panel glass-panel">
-        <h2 class="panel-title">Gráfico de atividade</h2>
+        <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px;">
+          <h2 class="panel-title" style="margin: 0;">Gráfico de atividade</h2>
+          <div style="color: var(--text-muted); font-size: 0.9rem; font-weight: 600;">
+            Ocorrências: <span id="range-count" style="color: #fff;">--</span>
+          </div>
+        </div>
         <div class="filter-row">
           <button class="filter-btn" data-range="1h" type="button">1h</button>
+          <button class="filter-btn" data-range="5h" type="button">5h</button>
           <button class="filter-btn" data-range="12h" type="button">12h</button>
           <button class="filter-btn active" data-range="24h" type="button">24h</button>
         </div>
         <div id="chart" class="chart"></div>
       </article>
     </section>
+  </div>
+
+  <div id="video-modal" class="video-modal">
+    <div class="video-modal-content">
+      <button class="video-modal-close" onclick="closeModal()">&times;</button>
+      <video id="modal-video-player" controls autoplay></video>
+    </div>
   </div>
 
   <script>
@@ -577,14 +629,6 @@
     // Configurando link do botão de relatório
     if (sensorId) {
       document.getElementById('btn-report').href = `/report?sensor_id=${encodeURIComponent(sensorId)}`;
-    }
-
-    function relativeTimeFromSeconds(seconds) {
-      if (seconds == null) return 'Sem registro';
-      if (seconds < 60) return `${seconds}s atrás`;
-      if (seconds < 3600) return `${Math.floor(seconds / 60)}min atrás`;
-      if (seconds < 86400) return `${Math.floor(seconds / 3600)}h atrás`;
-      return `${Math.floor(seconds / 86400)}d atrás`;
     }
 
     function renderChart(detail) {
@@ -612,15 +656,42 @@
       currentDetail = detail;
       document.title = `${detail.sensor.name} | Sensor Detail`;
       document.getElementById('sensor-name').textContent = detail.sensor.name;
-      const nameInput = document.getElementById('sensor-name-input');
-      if (document.activeElement !== nameInput) {
-        nameInput.value = detail.sensor.name;
-      }
       
-      document.getElementById('subline').textContent = `${detail.sensor.sensor_id} · Atividade em ${detail.analysis.range}`;
-      document.getElementById('last-detection').textContent = relativeTimeFromSeconds(detail.sensor.last_motion_ago_seconds);
+      document.getElementById('subline').textContent = `Atividade em ${detail.analysis.range}`;
       document.getElementById('range-count').textContent = `${detail.analysis.total_movements}`;
-      document.getElementById('sensor-code').textContent = detail.sensor.sensor_id;
+      
+      const snapContainer = document.getElementById('last-snap-container');
+      if (detail.sensor.last_motion_image) {
+          let snapUI = '';
+          const imgP = detail.sensor.last_motion_image;
+          const dtFmt = detail.sensor.last_motion_at_formatted || 'Desconhecido';
+          if (imgP.endsWith('.mp4')) {
+              let thumbP = imgP.replace('.mp4', '.jpg');
+              snapUI = `
+                 <div style="display:flex; flex-direction:column; gap:8px;">
+                   <div style="font-size:0.8rem; color:var(--text-muted); font-weight:600; text-transform:uppercase;">Última Detecção</div>
+                   <div class="snap-box" onclick="openModal('/snapshots/${imgP}')">
+                     <img src="/snapshots/${thumbP}" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' viewBox=\\'0 0 100 100\\'%3E%3Crect width=\\'100\\' height=\\'100\\' fill=\\'%231a1a2e\\'/%3E%3C/svg%3E'" />
+                     <div class="play-overlay">▶</div>
+                   </div>
+                   <div style="font-size:0.85rem; color:#fff; font-weight:600;">${dtFmt}</div>
+                 </div>
+              `;
+          } else {
+              snapUI = `
+                 <div style="display:flex; flex-direction:column; gap:8px;">
+                   <div style="font-size:0.8rem; color:var(--text-muted); font-weight:600; text-transform:uppercase;">Última Detecção</div>
+                   <div class="snap-box" onclick="openModal('/snapshots/${imgP}')">
+                     <img src="/snapshots/${imgP}" />
+                   </div>
+                   <div style="font-size:0.85rem; color:#fff; font-weight:600;">${dtFmt}</div>
+                 </div>
+              `;
+          }
+          snapContainer.innerHTML = snapUI;
+      } else {
+          snapContainer.innerHTML = '<div style="font-size:0.8rem; color:var(--text-muted);">Sem movimentos<br>registrados</div>';
+      }
       
       const toggle = document.getElementById('enabled-toggle');
       if (document.activeElement !== toggle) {
@@ -680,15 +751,30 @@
 
     document.getElementById('enabled-toggle').addEventListener('change', async (event) => {
       try {
-        await apiPost('/api/sensors/toggle', {
-          sensor_id: sensorId,
-          enabled: event.target.checked
-        });
+        await apiPost('/api/sensors/toggle', { sensor_id: sensorId, enabled: event.target.checked });
         await loadDetail(currentRange);
       } catch (error) {
         event.target.checked = !event.target.checked;
-        alert('Falha ao alterar estado do sensor.');
       }
+    });
+
+    function openModal(url) {
+      const modal = document.getElementById('video-modal');
+      const player = document.getElementById('modal-video-player');
+      player.src = url;
+      modal.classList.add('active');
+    }
+
+    function closeModal() {
+      const modal = document.getElementById('video-modal');
+      const player = document.getElementById('modal-video-player');
+      modal.classList.remove('active');
+      player.pause();
+      player.src = '';
+    }
+
+    document.getElementById('video-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'video-modal') closeModal();
     });
 
     document.getElementById('save-name').addEventListener('click', async () => {
@@ -722,15 +808,6 @@
         alert('Falha ao remover sensor.');
       }
     });
-
-    setInterval(() => {
-      if (currentDetail) {
-        document.getElementById('last-detection').textContent = relativeTimeFromSeconds(currentDetail.sensor.last_motion_ago_seconds == null ? null : currentDetail.sensor.last_motion_ago_seconds + 1);
-        if (currentDetail.sensor.last_motion_ago_seconds != null) {
-          currentDetail.sensor.last_motion_ago_seconds += 1;
-        }
-      }
-    }, 1000);
 
     // Controle de Edição do Agendamento
     window.isScheduleEditing = false;
@@ -789,7 +866,7 @@
     });
 
     loadDetail();
-    setInterval(() => loadDetail(currentRange), 5000);
+    setInterval(() => loadDetail(currentRange), 10000);
   </script>
 </body>
 </html>

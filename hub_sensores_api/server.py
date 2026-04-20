@@ -24,6 +24,7 @@ DASHBOARD_BIN_SECONDS = 20
 DASHBOARD_BIN_COUNT = 6
 DETAIL_RANGE_SECONDS = {
     "1h": 60 * 60,
+    "5h": 5 * 60 * 60,
     "12h": 12 * 60 * 60,
     "24h": 24 * 60 * 60,
 }
@@ -161,11 +162,11 @@ def fetch_sensor(sensor_id: str) -> sqlite3.Row | None:
     return row
 
 
-def fetch_last_movement(sensor_id: str) -> tuple[int, str] | None:
+def fetch_last_movement(sensor_id: str) -> tuple[int, str, str] | None:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             """
-            SELECT occurred_epoch, occurred_at
+            SELECT occurred_epoch, occurred_at, image_path
             FROM movements
             WHERE sensor_id = ?
             ORDER BY occurred_epoch DESC
@@ -602,7 +603,19 @@ def get_sensor_detail(sensor_id: str, range_key: str) -> dict | None:
     last_motion = fetch_last_movement(sensor_id)
     last_motion_epoch = int(last_motion[0]) if last_motion else None
     last_motion_at = last_motion[1] if last_motion else None
+    last_motion_image = last_motion[2] if last_motion else None
     last_motion_ago_seconds = None if last_motion_epoch is None else max(0, now_epoch - last_motion_epoch)
+    
+    last_motion_at_formatted = None
+    if last_motion_at:
+        try:
+            from datetime import datetime as dt_temp
+            dt = dt_temp.fromisoformat(last_motion_at)
+            # Fuso já é -3 (ou o logado ISO) – converter puramente para String formatada
+            dt_local = dt.astimezone(APP_TIMEZONE)
+            last_motion_at_formatted = dt_local.strftime("%d/%m/%Y %H:%M:%S")
+        except Exception:
+            last_motion_at_formatted = last_motion_at
 
     series = []
     counts = [0] * DETAIL_BIN_COUNT
@@ -657,12 +670,14 @@ def get_sensor_detail(sensor_id: str, range_key: str) -> dict | None:
             "schedule_end": sensor_dict.get("schedule_end", "23:59"),
             "schedule_days": sensor_dict.get("schedule_days", "0,1,2,3,4,5,6"),
             "schedule_alternate": sensor_dict.get("schedule_alternate", "none"),
-            "status_label": status_label,
-            "tone": tone,
+            "status_label": sensor_dict["status_label"],
+            "tone": sensor_dict["tone"],
             "registered_at": sensor_dict["registered_at"],
             "updated_at": sensor_dict["updated_at"],
             "last_motion_at": last_motion_at,
-            "last_motion_ago_seconds": last_motion_ago_seconds,
+            "last_motion_ago_seconds": sensor_dict["last_motion_ago_seconds"],
+            "last_motion_at_formatted": sensor_dict["last_motion_at_formatted"],
+            "last_motion_image": sensor_dict["last_motion_image"],
         },
         "analysis": {
             "range": normalized_range,
