@@ -539,6 +539,7 @@ def list_sensors(limit: int) -> list[dict]:
                 COALESCE(s.name, s.sensor_id) AS name,
                 COALESCE(s.icon, 'motion') AS icon,
                 s.enabled,
+                s.show_on_dashboard,
                 s.registered_at,
                 s.updated_at,
                 (
