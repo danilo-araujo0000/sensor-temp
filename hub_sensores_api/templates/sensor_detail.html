@@ -720,9 +720,19 @@
         document.getElementById('sch-start').value = detail.sensor.schedule_start;
         document.getElementById('sch-end').value = detail.sensor.schedule_end;
         
+        const nameInput = document.getElementById('sensor-name-input');
+        if (document.activeElement !== nameInput) {
+            nameInput.value = detail.sensor.name;
+        }
+
         const showInput = document.getElementById('sensor-show-dashboard');
         if (document.activeElement !== showInput) {
-            showInput.checked = detail.sensor.show_on_dashboard;
+            showInput.checked = detail.sensor.show_on_dashboard !== false;
+        }
+
+        const enabledToggle = document.getElementById('enabled-toggle');
+        if (document.activeElement !== enabledToggle) {
+            enabledToggle.checked = detail.sensor.enabled;
         }
 
         const days = detail.sensor.schedule_days.split(',');
