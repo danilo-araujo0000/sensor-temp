@@ -235,6 +235,7 @@
     /* Switch styling for dark UI */
     .switch {
       position: relative;
+      display: inline-block;
       width: 46px;
       height: 26px;
       flex: 0 0 auto;
@@ -245,6 +246,9 @@
       opacity: 0;
       width: 0;
       height: 0;
+      margin: 0;
+      padding: 0;
+      position: absolute;
     }
 
     .slider {
@@ -550,12 +554,13 @@
     // Attach event listeners for a specific card toggle
     function setupToggleListener(toggle) {
       toggle.addEventListener('change', async (event) => {
+        event.stopPropagation();
         const sensorId = event.target.getAttribute('data-sensor-id');
         const enabled = event.target.checked;
         event.target.disabled = true;
         try {
           await apiPost('/api/sensors/toggle', { sensor_id: sensorId, enabled });
-          await loadDashboard();
+          await loadDashboard(true);
         } catch (error) {
           event.target.checked = !enabled;
           alert('Falha ao alterar o sensor.');
