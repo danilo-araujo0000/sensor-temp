@@ -87,6 +87,7 @@ def init_db() -> None:
         ensure_column(conn, "sensors", "schedule_end", "TEXT DEFAULT '23:59'")
         ensure_column(conn, "sensors", "schedule_days", "TEXT DEFAULT '0,1,2,3,4,5,6'")
         ensure_column(conn, "sensors", "schedule_alternate", "TEXT DEFAULT 'none'")
+        ensure_column(conn, "sensors", "show_on_dashboard", "INTEGER NOT NULL DEFAULT 1")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_sensors_device
@@ -153,7 +154,7 @@ def fetch_sensor(sensor_id: str) -> sqlite3.Row | None:
         row = conn.execute(
             """
             SELECT sensor_id, device_id, pin, name, icon, enabled, registered_at, updated_at, rtsp_url,
-                   schedule_mode, schedule_start, schedule_end, schedule_days, schedule_alternate
+                   schedule_mode, schedule_start, schedule_end, schedule_days, schedule_alternate, show_on_dashboard
             FROM sensors
             WHERE sensor_id = ?
             """,
@@ -280,6 +281,29 @@ def set_sensor_enabled(sensor_id: str, enabled: bool) -> dict | None:
             WHERE sensor_id = ?
             """,
             (1 if enabled else 0, agora, sensor_id),
+        )
+        conn.commit()
+
+    sensor = fetch_sensor(sensor_id)
+    return {
+        "sensor_id": sensor["sensor_id"],
+        "enabled": bool(sensor["enabled"]),
+        "updated_at": sensor["updated_at"],
+    }
+
+def set_sensor_dashboard_visibility(sensor_id: str, show: bool) -> dict | None:
+    if fetch_sensor(sensor_id) is None:
+        return None
+
+    agora = app_now().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE sensors
+            SET show_on_dashboard = ?, updated_at = ?
+            WHERE sensor_id = ?
+            """,
+            (1 if show else 0, agora, sensor_id),
         )
         conn.commit()
 
@@ -670,6 +694,7 @@ def get_sensor_detail(sensor_id: str, range_key: str) -> dict | None:
             "schedule_end": sensor_dict.get("schedule_end", "23:59"),
             "schedule_days": sensor_dict.get("schedule_days", "0,1,2,3,4,5,6"),
             "schedule_alternate": sensor_dict.get("schedule_alternate", "none"),
+            "show_on_dashboard": bool(sensor_dict.get("show_on_dashboard", 1)),
             "status_label": status_label,
             "tone": tone,
             "registered_at": sensor_dict["registered_at"],
@@ -748,6 +773,7 @@ def build_dashboard_payload() -> dict:
                 "name": sensor["name"],
                 "icon": sensor["icon"],
                 "enabled": sensor["enabled"],
+                "show_on_dashboard": bool(sensor["show_on_dashboard"]),
                 "status_label": status_label,
                 "tone": tone,
                 "recent_bins": bins,
@@ -1019,6 +1045,20 @@ class SensorHubHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json(HTTPStatus.OK, {"ok": True, **result})
             return
+
+        if parsed.path == "/api/sensors/config_dashboard":
+            sensor_id = str(payload.get("sensor_id", "")).strip()
+            show = coerce_bool(payload.get("show_on_dashboard", True))
+            if not sensor_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "sensor_id_required"})
+                return
+            result = set_sensor_dashboard_visibility(sensor_id, show)
+            if result is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "sensor_not_found"})
+            else:
+                self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            return
+
 
         if parsed.path == "/api/sensors/rename":
             sensor_id = str(payload.get("sensor_id", "")).strip()

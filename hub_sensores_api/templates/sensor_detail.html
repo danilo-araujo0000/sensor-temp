@@ -522,9 +522,19 @@
           <label>Nome do sensor</label>
           <input id="sensor-name-input" class="form-control" type="text" value="" />
         </div>
+        <div class="form-group" style="margin-bottom:24px;">
+          <label>Opções de Exibição</label>
+          <div style="display:flex; align-items:center; gap:12px; margin-top:8px;">
+            <label class="switch" style="width: 40px; height: 22px;">
+              <input id="sensor-show-dashboard" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+            <span style="color:#fff; font-size:0.95rem;">Mostrar no Início (Dashboard)</span>
+          </div>
+        </div>
         <div style="display:flex; justify-content:flex-end; align-items:center; gap: 12px; margin-bottom:24px;">
           <span id="save-name-feedback" class="subline" style="margin:0;"></span>
-          <button id="save-name" class="btn primary" type="button">Salvar nome</button>
+          <button id="save-name" class="btn primary" type="button">Salvar Configurações Gerais</button>
         </div>
         <div class="schedule-grid">
           <div class="form-group">
@@ -710,6 +720,11 @@
         document.getElementById('sch-start').value = detail.sensor.schedule_start;
         document.getElementById('sch-end').value = detail.sensor.schedule_end;
         
+        const showInput = document.getElementById('sensor-show-dashboard');
+        if (document.activeElement !== showInput) {
+            showInput.checked = detail.sensor.show_on_dashboard;
+        }
+
         const days = detail.sensor.schedule_days.split(',');
         document.querySelectorAll('.day-btn').forEach(btn => {
            btn.classList.toggle('active', days.includes(btn.dataset.day));
@@ -780,13 +795,15 @@
     document.getElementById('save-name').addEventListener('click', async () => {
       const feedback = document.getElementById('save-name-feedback');
       const name = document.getElementById('sensor-name-input').value.trim();
+      const show_on_dashboard = document.getElementById('sensor-show-dashboard').checked;
       if (!name) {
         feedback.textContent = 'Informe um nome.';
         return;
       }
       try {
         await apiPost('/api/sensors/rename', { sensor_id: sensorId, name });
-        feedback.textContent = 'Nome salvo!';
+        await apiPost('/api/sensors/config_dashboard', { sensor_id: sensorId, show_on_dashboard });
+        feedback.textContent = 'Configuração salva!';
         feedback.style.color = 'var(--green)';
         await loadDetail(currentRange);
       } catch (error) {

@@ -474,7 +474,14 @@
         <details class="config-group">
           <summary>⚙️ Preferências Gerais</summary>
           <div class="config-group-content">
-            <p style="color:var(--text-muted)">Opções do motor e tempos de timeout em breve.</p>
+            <div style="display:flex; align-items:center; gap: 12px; margin-bottom: 12px;">
+              <label class="switch">
+                 <input type="checkbox" id="toggle-hidden-sensors">
+                 <span class="slider"></span>
+              </label>
+              <span style="color:#fff;">Ver todos os sensores (incluir ocultos)</span>
+            </div>
+            <p style="color:var(--text-muted); font-size:0.9rem;">Sensores ocultos não aparecem no painel frontal por padrão.</p>
           </div>
         </details>
       </div>
@@ -493,6 +500,13 @@
     };
 
     const cardsEl = document.getElementById('cards');
+    let showHiddenSensors = false;
+    let lastRenderedCount = -1;
+
+    document.getElementById('toggle-hidden-sensors').addEventListener('change', (e) => {
+        showHiddenSensors = e.target.checked;
+        loadDashboard(true);
+    });
 
     function relativeTime(isoString) {
       if (!isoString) return 'Sem movimento';
@@ -551,20 +565,23 @@
       });
     }
 
-    async function loadDashboard() {
+    async function loadDashboard(forceRedraw = false) {
       const response = await fetch('/api/dashboard');
       const data = await response.json();
 
-      if (!data.sensors.length) {
-        cardsEl.innerHTML = '<div class="empty">Nenhum sensor registrado.</div>';
+      const visibleSensors = data.sensors.filter(s => s.show_on_dashboard || showHiddenSensors);
+
+      if (!visibleSensors.length) {
+        cardsEl.innerHTML = '<div class="empty">Nenhum sensor registrado ou visível.</div>';
+        lastRenderedCount = 0;
         return;
       }
 
       // DOM diffing manual apenas para evitar piscadas com innerHTML total
-      if (cardsEl.children.length !== data.sensors.length || cardsEl.querySelector('.empty')) {
+      if (forceRedraw || cardsEl.children.length !== visibleSensors.length || cardsEl.querySelector('.empty')) {
         // Redesenho total se quantidade nao bater ou estado vazio
-        cardsEl.innerHTML = data.sensors.map((sensor) => `
-          <article class="card tone-${sensor.tone}">
+        cardsEl.innerHTML = visibleSensors.map((sensor) => `
+          <article class="card tone-${sensor.tone}" style="cursor:pointer;" onclick="if(!event.target.closest('.switch')) window.location.href='/sensor?sensor_id=${encodeURIComponent(sensor.sensor_id)}'">
             <div class="card-header">
               <div class="sensor-meta">
                 <div class="icon-box">${iconMap[sensor.icon] || iconMap.motion}</div>
@@ -573,6 +590,7 @@
                   <div class="sensor-status tone-${sensor.tone}">
                     <span class="dot tone-${sensor.tone}"></span>
                     <span>${sensor.status_label}</span>
+                    ${!sensor.show_on_dashboard ? '<span style="color:var(--orange);font-size:0.7rem;margin-left:4px;">(Oculto)</span>' : ''}
                   </div>
                   <div class="sensor-device">Pino ${sensor.pin} &middot; ${escapeHtml(sensor.device_id)}</div>
                 </div>
@@ -587,15 +605,15 @@
             <div class="bars">${renderBars(sensor.recent_bins, sensor.tone)}</div>
             <div class="card-footer">
               <span>${relativeTime(sensor.last_motion_at)}</span>
-              <a class="details-link" href="/sensor?sensor_id=${encodeURIComponent(sensor.sensor_id)}">Detalhes</a>
             </div>
           </article>
         `).join('');
 
         cardsEl.querySelectorAll('input[data-sensor-id]').forEach(setupToggleListener);
+        lastRenderedCount = visibleSensors.length;
       } else {
         // Modifica pontualmente os itens de um cartao existente
-        data.sensors.forEach((sensor, index) => {
+        visibleSensors.forEach((sensor, index) => {
           const card = cardsEl.children[index];
           
           if (card.className !== `card tone-${sensor.tone}`) {
@@ -607,7 +625,21 @@
           const statusDiv = card.querySelector('.sensor-status');
           statusDiv.className = `sensor-status tone-${sensor.tone}`;
           statusDiv.querySelector('.dot').className = `dot tone-${sensor.tone}`;
-          statusDiv.querySelector('span:last-child').textContent = sensor.status_label;
+          statusDiv.querySelector('span:nth-child(2)').textContent = sensor.status_label;
+          
+          let hiddenBadge = statusDiv.querySelector('span:nth-child(3)');
+          if (!sensor.show_on_dashboard) {
+              if (!hiddenBadge) {
+                  const badge = document.createElement('span');
+                  badge.style.color = 'var(--orange)';
+                  badge.style.fontSize = '0.7rem';
+                  badge.style.marginLeft = '4px';
+                  badge.textContent = '(Oculto)';
+                  statusDiv.appendChild(badge);
+              }
+          } else {
+              if (hiddenBadge) hiddenBadge.remove();
+          }
           
           const checkbox = card.querySelector('input[data-sensor-id]');
           if (document.activeElement !== checkbox) {
