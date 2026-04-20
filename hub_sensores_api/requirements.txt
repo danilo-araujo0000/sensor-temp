@@ -1,0 +1,15 @@
+# Dependências do Python
+# Para instalar rode: pip install -r requirements.txt
+opencv-python>=4.8.0
+
+# ------------------------------------------------------------------
+# NOTAS DO SISTEMA:
+#
+# 1. As demais bibliotecas usadas no server.py (sqlite3, threading, 
+# subprocess, urllib, mimetypes, json, uuid e http) já são NATIVAS 
+# e acompanham qualquer instalação do Python 3.
+#
+# 2. Dependência de SO (Indispensável):
+# Você DEVE ter o executável do 'ffmpeg' instalado e funcional no 
+# seu PATH de Variáveis de Ambiente do Windows para que os 
+# disparos de vídeo em MP4 e frames em JPG funcionem corretamente.
