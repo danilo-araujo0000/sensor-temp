@@ -1,4 +1,4 @@
-#line 1 "U:\\build\\sensor\\sensor-temp\\main.h"
+#line 1 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\main.h"
 #include "Adafruit_GC9A01A.h"
 #include <WiFi.h>
 #include <WebServer.h>

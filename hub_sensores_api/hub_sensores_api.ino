@@ -1,11 +1,11 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 
-constexpr char WIFI_SSID[] = "Tablet";
-constexpr char WIFI_PASSWORD[] = "TABLET@admin2024";
+constexpr char WIFI_SSID[] = "Danilo";
+constexpr char WIFI_PASSWORD[] = "996639078Dd*";
 constexpr char DEVICE_ID[] = "esp32s3-hub-01";
-constexpr char SENSOR_REGISTER_URL[] = "http://172.19.200.1:5080/sensors/register";
-constexpr char MOVEMENT_URL[] = "http://172.19.200.1:5080/movements";
+constexpr char SENSOR_REGISTER_URL[] = "http://192.168.18.64:5080/sensors/register";
+constexpr char MOVEMENT_URL[] = "http://192.168.18.64:5080/movements";
 
 constexpr unsigned long WIFI_RETRY_MS = 10000;
 constexpr unsigned long SENSOR_POLL_MS = 25;
