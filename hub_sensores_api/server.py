@@ -30,9 +30,9 @@ DETAIL_BIN_COUNT = 12
 APP_TIMEZONE = timezone(timedelta(hours=-3))
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "sensor_events.db"
-DASHBOARD_HTML_PATH = BASE_DIR / "dashboard.html"
-SENSOR_DETAIL_HTML_PATH = BASE_DIR / "sensor_detail.html"
-SENSOR_REPORT_HTML_PATH = BASE_DIR / "sensor_report.html"
+DASHBOARD_HTML_PATH = BASE_DIR / "templates" / "dashboard.html"
+SENSOR_DETAIL_HTML_PATH = BASE_DIR / "templates" / "sensor_detail.html"
+SENSOR_REPORT_HTML_PATH = BASE_DIR / "templates" / "sensor_report.html"
 SNAPSHOTS_DIR = BASE_DIR / "snapshots"
 SNAPSHOTS_DIR.mkdir(exist_ok=True)
 
