@@ -21,8 +21,8 @@
 #define ENC_DT 6
 #define ENC_SW 7
 
-const char* ssid = "Danilo";
-const char* password = "996639078Dd*";
+const char* ssid = "Tablet";
+const char* password = "TABLET@admin2024";
 
 Adafruit_GC9A01A tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
 OneWire oneWire(ONE_WIRE_BUS);
@@ -557,16 +557,59 @@ void atualizarLedIntegrado() {
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1.0' charset='UTF-8'>";
-  html += "<style>body{background:#121212; color:#00ff88; font-family:sans-serif; text-align:center; padding-top:50px;}";
-  html += ".box{border:2px solid #00f2ff; display:inline-block; padding:40px; border-radius:20px; background:#1e1e1e;}";
-  html += "h1{font-size:80px; margin:20px 0;} a{color:#00f2ff;}</style>";
-  html += "<script>setInterval(function(){fetch('/readTemp').then(r=>r.text()).then(v=>{document.getElementById('v').innerHTML=v;});}, 1000);</script>";
+  html += "<style>body{background:#121212;color:#d9f1e5;font-family:sans-serif;margin:0;padding:24px;}";
+  html += ".box{max-width:760px;margin:0 auto;border:1px solid #00f2ff;padding:24px;border-radius:20px;background:#1e1e1e;box-shadow:0 12px 30px rgba(0,0,0,.35);}";
+  html += "h1{font-size:72px;line-height:1;margin:12px 0;color:#00ff88;}h2{margin:0 0 8px 0;color:#fff;}";
+  html += "p{margin:8px 0;color:#b7c3cd;}a{color:#00f2ff;}";
+  html += ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-top:20px;}";
+  html += ".card{padding:16px;border-radius:16px;background:#151515;border:1px solid #2e3a42;text-align:left;}";
+  html += ".label{font-size:.85rem;text-transform:uppercase;letter-spacing:.08em;color:#9aa4ad;}";
+  html += ".value{font-size:1.8rem;margin-top:8px;color:#fff;}";
+  html += ".online{color:#00ff88;}.offline{color:#ff6b6b;}.muted{color:#9aa4ad;}";
+  html += "</style>";
+  html += "<script>"
+          "async function refreshStatus(){"
+          "try{"
+          "const r=await fetch('/api/temperature');"
+          "const data=await r.json();"
+          "const mainOnline=!!data.sensor_online;"
+          "document.getElementById('topStatus').textContent=mainOnline?'Online':'Offline';"
+          "document.getElementById('topStatus').className=mainOnline?'value online':'value offline';"
+          "document.getElementById('topTemp').textContent=mainOnline?(Number(data.temperature_c).toFixed(1)+' C'):'--.- C';"
+          "document.getElementById('topTemp').className=mainOnline?'value':'value muted';"
+          "document.getElementById('mainCardStatus').textContent=mainOnline?'Online':'Offline';"
+          "document.getElementById('mainCardStatus').className=mainOnline?'value online':'value offline';"
+          "document.getElementById('mainCardTemp').textContent=mainOnline?(Number(data.temperature_c).toFixed(1)+' C'):'--.- C';"
+          "document.getElementById('mainCardTemp').className=mainOnline?'value':'value muted';"
+          "const dhtOnline=!!data.dht11_online;"
+          "document.getElementById('dhtCardStatus').textContent=dhtOnline?'Online':'Offline';"
+          "document.getElementById('dhtCardStatus').className=dhtOnline?'value online':'value offline';"
+          "document.getElementById('dhtCardTemp').textContent=dhtOnline && data.dht11_temperature_c !== null ? (Number(data.dht11_temperature_c).toFixed(1)+' C') : '--.- C';"
+          "document.getElementById('dhtCardTemp').className=dhtOnline?'value':'value muted';"
+          "const humOnline=!!data.humidity_online;"
+          "document.getElementById('humCardStatus').textContent=humOnline?'Online':'Offline';"
+          "document.getElementById('humCardStatus').className=humOnline?'value online':'value offline';"
+          "document.getElementById('humCardValue').textContent=humOnline && data.humidity_percent !== null ? (Math.round(Number(data.humidity_percent))+' %') : '-- %';"
+          "document.getElementById('humCardValue').className=humOnline?'value':'value muted';"
+          "document.getElementById('ipValue').textContent=data.ip || 'Sem WiFi';"
+          "}catch(e){"
+          "['topStatus','mainCardStatus','dhtCardStatus','humCardStatus'].forEach(function(id){var el=document.getElementById(id);if(el){el.textContent='Offline';el.className='value offline';}});"
+          "['topTemp','mainCardTemp','dhtCardTemp'].forEach(function(id){var el=document.getElementById(id);if(el){el.textContent='--.- C';el.className='value muted';}});"
+          "var hum=document.getElementById('humCardValue');if(hum){hum.textContent='-- %';hum.className='value muted';}"
+          "var ip=document.getElementById('ipValue');if(ip){ip.textContent='Sem WiFi';}"
+          "}}"
+          "setInterval(refreshStatus,1000);"
+          "window.addEventListener('load',refreshStatus);"
+          "</script>";
   html += "</head><body><div class='box'><h2>TERMOMETRO S3</h2>";
-  html += "<h1 id='v'>" + String(tempAtual, 2) + "</h1><h2>Celsius</h2>";
-  if (umidadeOnline) {
-    html += "<p>Umidade: " + String(static_cast<int>(roundf(umidadeAtual))) + "%</p>";
-  }
-  html += "<p>IP atual: " + WiFi.localIP().toString() + "</p>";
+  html += "<h1 id='topTemp'>" + (sensorOnline ? String(tempAtual, 1) : String("--.-")) + "</h1><h2>Celsius</h2>";
+  html += "<p id='topStatus' class='" + String(sensorOnline ? "value online" : "value offline") + "'>" + String(sensorOnline ? "Online" : "Offline") + "</p>";
+  html += "<div class='grid'>";
+  html += "<div class='card'><div class='label'>Sensor principal</div><div id='mainCardStatus' class='" + String(sensorOnline ? "value online" : "value offline") + "'>" + String(sensorOnline ? "Online" : "Offline") + "</div><div class='label' style='margin-top:12px;'>Temperatura</div><div id='mainCardTemp' class='" + String(sensorOnline ? "value" : "value muted") + "'>" + (sensorOnline ? String(tempAtual, 1) : String("--.-")) + " C</div></div>";
+  html += "<div class='card'><div class='label'>DHT11 - temperatura</div><div id='dhtCardStatus' class='" + String(temperaturaDhtOnline ? "value online" : "value offline") + "'>" + String(temperaturaDhtOnline ? "Online" : "Offline") + "</div><div class='label' style='margin-top:12px;'>Temperatura</div><div id='dhtCardTemp' class='" + String(temperaturaDhtOnline ? "value" : "value muted") + "'>" + (temperaturaDhtOnline ? String(temperaturaDhtAtual, 1) : String("--.-")) + " C</div></div>";
+  html += "<div class='card'><div class='label'>DHT11 - umidade</div><div id='humCardStatus' class='" + String(umidadeOnline ? "value online" : "value offline") + "'>" + String(umidadeOnline ? "Online" : "Offline") + "</div><div class='label' style='margin-top:12px;'>Umidade</div><div id='humCardValue' class='" + String(umidadeOnline ? "value" : "value muted") + "'>" + (umidadeOnline ? String(static_cast<int>(roundf(umidadeAtual))) : String("--")) + " %</div></div>";
+  html += "</div>";
+  html += "<p>IP atual: <span id='ipValue'>" + WiFi.localIP().toString() + "</span></p>";
   html += "<p>Rede via DHCP</p>";
   html += "<p><a href='/alertas'>Configurar alertas</a></p>";
   html += "</div></body></html>";
@@ -580,10 +623,15 @@ void handleTemp() {
 void handleApiTemperature() {
   String json = "{";
   json += "\"ok\":true,";
-  json += "\"temperature_c\":" + String(tempAtual, 2) + ",";
+  json += "\"sensor_online\":" + String(sensorOnline ? "true" : "false") + ",";
+  json += "\"temperature_c\":";
+  json += sensorOnline ? String(tempAtual, 2) : "null";
+  json += ",";
+  json += "\"humidity_online\":" + String(umidadeOnline ? "true" : "false") + ",";
   json += "\"humidity_percent\":";
   json += umidadeOnline ? String(umidadeAtual, 0) : "null";
   json += ",";
+  json += "\"dht11_online\":" + String(temperaturaDhtOnline ? "true" : "false") + ",";
   json += "\"dht11_temperature_c\":";
   json += temperaturaDhtOnline ? String(temperaturaDhtAtual, 1) : "null";
   json += ",";
