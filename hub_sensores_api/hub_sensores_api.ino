@@ -5,6 +5,7 @@
 
 constexpr char SENSOR_REGISTER_ROUTE[] = "/sensors/register";
 constexpr char MOVEMENT_ROUTE[] = "/movements";
+constexpr char HEARTBEAT_ROUTE[] = "/devices/heartbeat";
 constexpr char HEALTH_ROUTE[] = "/health";
 
 constexpr unsigned long WIFI_RETRY_MS = 10000;
@@ -12,6 +13,7 @@ constexpr unsigned long SENSOR_POLL_MS = 25;
 // Se a rede ou a API ficarem indisponiveis por muito tempo, o ESP reinicia para sair de estados ruins.
 constexpr unsigned long WIFI_MAX_OFFLINE_MS = 5UL * 60UL * 1000UL;
 constexpr unsigned long HEALTH_CHECK_MS = 60UL * 1000UL;
+constexpr unsigned long DEVICE_HEARTBEAT_MS = 3UL * 1000UL;
 constexpr uint8_t HEALTH_MAX_FALHAS = 5;
 constexpr uint32_t WATCHDOG_TIMEOUT_SECONDS = 20;
 constexpr uint8_t PINO_SEM_SECUNDARIO = 255;
@@ -29,6 +31,8 @@ struct SensorConfig {
   uint8_t pinPrincipal;
   uint8_t pinSecundario;
   TipoLigacao ligacao;
+  bool enabled;
+  bool showOnDashboard;
   bool lastState;
 };
 
@@ -40,6 +44,7 @@ unsigned long ultimoWifiRetryMs = 0;
 unsigned long ultimoPollMs = 0;
 unsigned long wifiDesconectadoDesdeMs = 0;
 unsigned long ultimoHealthCheckMs = 0;
+unsigned long ultimoHeartbeatMs = 0;
 uint8_t falhasHealth = 0;
 bool sensoresRegistrados = false;
 bool watchdogAtivo = false;
@@ -151,6 +156,7 @@ bool postJson(const char* url, const String& payload, int& httpCode, String& res
     return false;
   }
 
+  http.setTimeout(3000);
   http.addHeader("Content-Type", "application/json");
   httpCode = http.POST(payload);
   resposta = http.getString();
@@ -196,7 +202,9 @@ bool registrarSensoresNoBackend() {
     if (i > 0) payload += ",";
     payload += "{";
     payload += "\"sensor_id\":\"" + montarSensorId(sensores[i]) + "\",";
-    payload += "\"pin\":" + String(sensores[i].pinPrincipal);
+    payload += "\"pin\":" + String(sensores[i].pinPrincipal) + ",";
+    payload += "\"enabled\":" + String(sensores[i].enabled ? "true" : "false") + ",";
+    payload += "\"show_on_dashboard\":" + String(sensores[i].showOnDashboard ? "true" : "false");
     payload += "}";
   }
 
@@ -269,6 +277,21 @@ bool enviarEvento(const SensorConfig& sensor) {
   return httpCode >= 200 && httpCode < 300;
 }
 
+bool enviarHeartbeatDispositivo() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  String payload = "{\"device_id\":\"" + String(DEVICE_ID) + "\"}";
+  int httpCode = 0;
+  String resposta;
+  if (!postJson(montarUrl(HEARTBEAT_ROUTE).c_str(), payload, httpCode, resposta)) {
+    return false;
+  }
+
+  return httpCode >= 200 && httpCode < 300;
+}
+
 void configurarPinoSensor(uint8_t pin, TipoLigacao ligacao) {
   if (ligacao == LigacaoGpio3V3) {
     pinMode(pin, INPUT_PULLDOWN);
@@ -330,6 +353,11 @@ void loop() {
     registrarSensoresNoBackend();
   }
 
+  if (WiFi.status() == WL_CONNECTED && agora - ultimoHeartbeatMs >= DEVICE_HEARTBEAT_MS) {
+    ultimoHeartbeatMs = agora;
+    enviarHeartbeatDispositivo();
+  }
+
   if (WiFi.status() == WL_CONNECTED && agora - ultimoHealthCheckMs >= HEALTH_CHECK_MS) {
     ultimoHealthCheckMs = agora;
     if (verificarHealthBackend()) {
@@ -352,9 +380,10 @@ void loop() {
     if (bordaSubida) {
       Serial.print("Movimento detectado em ");
       Serial.println(sensores[i].id);
-      piscarStatusPorDuracao(64, 0, 0, 3000, 150);
+      bool eventoEnviado = enviarEvento(sensores[i]);
+      piscarStatusPorDuracao(0, 64, 0, 400, 100);
 
-      if (enviarEvento(sensores[i])) {
+      if (eventoEnviado) {
         piscarStatus(0, 0, 32, 1, 80);
       } else {
         piscarStatus(32, 0, 0, 1, 100);

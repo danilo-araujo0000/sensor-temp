@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
 import sqlite3
+import ssl
 import threading
 import time
 import uuid
@@ -16,6 +19,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 HOST = "0.0.0.0"
@@ -40,6 +45,8 @@ SENSOR_DETAIL_HTML_PATH = BASE_DIR / "templates" / "sensor_detail.html"
 SENSOR_REPORT_HTML_PATH = BASE_DIR / "templates" / "sensor_report.html"
 SNAPSHOTS_DIR = BASE_DIR / "snapshots"
 SNAPSHOTS_DIR.mkdir(exist_ok=True)
+SENSOR_ICONS_DIR = BASE_DIR / "sensor_icons"
+SENSOR_ICONS_DIR.mkdir(exist_ok=True)
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -85,6 +92,17 @@ SNAPSHOTS_CLEANUP_INTERVAL_SECONDS = max(env_int("SNAPSHOTS_CLEANUP_INTERVAL_SEC
 SNAPSHOTS_RETENTION_DAYS = env_int("SNAPSHOTS_RETENTION_DAYS", 30)
 SNAPSHOTS_MAX_SIZE_MB = env_int("SNAPSHOTS_MAX_SIZE_MB", 2048)
 SNAPSHOT_MEDIA_EXTENSIONS = {".mp4", ".jpg", ".jpeg", ".png"}
+AUTOMATION_LOOP_SECONDS = max(env_int("AUTOMATION_LOOP_SECONDS", 30), 5)
+EXTERNAL_API_BASE_URL = env_value("EXTERNAL_API_BASE_URL", "https://retro.tdanilo.com").rstrip("/")
+EXTERNAL_API_TOKEN = env_value("EXTERNAL_API_TOKEN", "")
+EXTERNAL_API_TIMEOUT_SECONDS = max(env_int("EXTERNAL_API_TIMEOUT_SECONDS", 15), 3)
+EXTERNAL_API_INSECURE_TLS = env_bool("EXTERNAL_API_INSECURE_TLS", False)
+EXTERNAL_API_DEVICE_CACHE_SECONDS = max(env_int("EXTERNAL_API_DEVICE_CACHE_SECONDS", 300), 30)
+DEVICE_HEARTBEAT_TIMEOUT_SECONDS = max(env_int("DEVICE_HEARTBEAT_TIMEOUT_SECONDS", 10), 3)
+MODERATOR_API_BASE_URL = env_value("MODERATOR_API_BASE_URL", "").rstrip("/")
+MODERATOR_API_USERNAME = env_value("MODERATOR_API_USERNAME", "")
+MODERATOR_API_PASSWORD = env_value("MODERATOR_API_PASSWORD", "")
+MODERATOR_API_TIMEOUT_SECONDS = max(env_int("MODERATOR_API_TIMEOUT_SECONDS", 15), 3)
 
 
 def resolve_ffmpeg_bin() -> str:
@@ -100,6 +118,11 @@ def resolve_ffmpeg_bin() -> str:
 
 
 FFMPEG_BIN = resolve_ffmpeg_bin()
+EXTERNAL_API_SSL_CONTEXT = ssl._create_unverified_context() if EXTERNAL_API_INSECURE_TLS else ssl.create_default_context()
+EXTERNAL_DEVICE_CACHE = {"fetched_at": 0.0, "devices": [], "error": None}
+EXTERNAL_DEVICE_CACHE_LOCK = threading.Lock()
+MODERATOR_COOKIE_HEADER = ""
+MODERATOR_COOKIE_LOCK = threading.Lock()
 
 
 def app_now() -> datetime:
@@ -136,6 +159,34 @@ def init_db() -> None:
         ensure_column(conn, "sensors", "schedule_days", "TEXT DEFAULT '0,1,2,3,4,5,6'")
         ensure_column(conn, "sensors", "schedule_alternate", "TEXT DEFAULT 'none'")
         ensure_column(conn, "sensors", "show_on_dashboard", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "sensors", "automation_motion_enabled", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "sensors", "automation_motion_device_id", "TEXT")
+        ensure_column(conn, "sensors", "automation_motion_action", "TEXT DEFAULT 'power'")
+        ensure_column(conn, "sensors", "automation_motion_state", "TEXT DEFAULT 'ON'")
+        ensure_column(conn, "sensors", "automation_idle_enabled", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "sensors", "automation_idle_minutes", "INTEGER NOT NULL DEFAULT 10")
+        ensure_column(conn, "sensors", "automation_idle_device_id", "TEXT")
+        ensure_column(conn, "sensors", "automation_idle_action", "TEXT DEFAULT 'power'")
+        ensure_column(conn, "sensors", "automation_idle_state", "TEXT DEFAULT 'OFF'")
+        ensure_column(conn, "sensors", "automation_idle_triggered_epoch", "INTEGER")
+        ensure_column(conn, "sensors", "automation_last_event", "TEXT")
+        ensure_column(conn, "sensors", "automation_last_status", "TEXT")
+        ensure_column(conn, "sensors", "automation_last_response", "TEXT")
+        ensure_column(conn, "sensors", "automation_last_run_at", "TEXT")
+        ensure_column(conn, "sensors", "automation_enabled", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "sensors", "automation_trigger", "TEXT DEFAULT 'motion'")
+        ensure_column(conn, "sensors", "automation_device_id", "TEXT")
+        ensure_column(conn, "sensors", "automation_action", "TEXT DEFAULT 'power'")
+        ensure_column(conn, "sensors", "automation_state", "TEXT DEFAULT 'ON'")
+        ensure_column(conn, "sensors", "automation_repeat_mode", "TEXT DEFAULT 'once'")
+        ensure_column(conn, "sensors", "automation_repeat_seconds", "INTEGER NOT NULL DEFAULT 30")
+        ensure_column(conn, "sensors", "automation_last_trigger_epoch", "INTEGER")
+        ensure_column(conn, "sensors", "automation_last_condition_key", "TEXT")
+        ensure_column(conn, "sensors", "automation_notify_enabled", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "sensors", "automation_notify_contact_ids", "TEXT")
+        ensure_column(conn, "sensors", "automation_notify_message", "TEXT")
+        ensure_column(conn, "sensors", "device_last_seen_at", "TEXT")
+        ensure_column(conn, "sensors", "device_last_seen_epoch", "INTEGER")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_sensors_device
@@ -167,6 +218,23 @@ def init_db() -> None:
             ON movements(device_id, occurred_epoch DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_phone
+            ON contacts(phone)
+            """
+        )
         conn.commit()
 
 
@@ -196,13 +264,86 @@ def default_sensor_icon(sensor_id: str) -> str:
     return mapping.get(key, "motion")
 
 
+ICON_BUILTIN_NAMES = {"entry", "sofa", "hall", "garage", "garden", "motion"}
+ICON_UPLOAD_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
+
+
+def sanitize_sensor_icon_value(icon_value: object, sensor_id: str) -> str:
+    raw = str(icon_value or "").strip()
+    if not raw:
+        return default_sensor_icon(sensor_id)
+    return raw
+
+
+def infer_icon_kind(icon_value: str, sensor_id: str) -> str:
+    normalized = sanitize_sensor_icon_value(icon_value, sensor_id)
+    if normalized.startswith("fa:"):
+        return "fa"
+    if normalized.startswith("upload:"):
+        return "upload"
+    return "builtin"
+
+
+def sensor_icon_url(icon_value: str, sensor_id: str) -> str:
+    normalized = sanitize_sensor_icon_value(icon_value, sensor_id)
+    if normalized.startswith("upload:"):
+        return f"/sensor-icons/{normalized.replace('upload:', '', 1)}"
+    return ""
+
+
+def delete_uploaded_sensor_icon(icon_value: str) -> None:
+    if not icon_value.startswith("upload:"):
+        return
+    filename = icon_value.replace("upload:", "", 1).strip()
+    if not filename:
+        return
+    path = SENSOR_ICONS_DIR / Path(filename).name
+    try:
+        if path.exists() and path.is_file():
+            path.unlink()
+    except OSError as exc:
+        print(f"Falha ao remover icone enviado {path}: {exc}", flush=True)
+
+
+def store_uploaded_sensor_icon(sensor_id: str, file_name: str, file_base64: str) -> str:
+    name = Path(str(file_name or "").strip()).name
+    extension = Path(name).suffix.lower()
+    if extension not in ICON_UPLOAD_EXTENSIONS:
+        raise ValueError("icon_extension_not_allowed")
+
+    try:
+        binary = base64.b64decode(str(file_base64 or ""), validate=True)
+    except (ValueError, TypeError):
+        raise ValueError("invalid_icon_base64")
+
+    if not binary:
+        raise ValueError("empty_icon_file")
+    if len(binary) > 2 * 1024 * 1024:
+        raise ValueError("icon_file_too_large")
+
+    safe_sensor = re.sub(r"[^a-zA-Z0-9_-]+", "_", sensor_id)[:80] or "sensor"
+    filename = f"{safe_sensor}_{int(time.time())}{extension}"
+    path = SENSOR_ICONS_DIR / filename
+    path.write_bytes(binary)
+    return f"upload:{filename}"
+
+
 def fetch_sensor(sensor_id: str) -> sqlite3.Row | None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             """
             SELECT sensor_id, device_id, pin, name, icon, enabled, registered_at, updated_at, rtsp_url,
-                   schedule_mode, schedule_start, schedule_end, schedule_days, schedule_alternate, show_on_dashboard
+                   schedule_mode, schedule_start, schedule_end, schedule_days, schedule_alternate, show_on_dashboard,
+                   automation_motion_enabled, automation_motion_device_id, automation_motion_action,
+                   automation_motion_state, automation_idle_enabled, automation_idle_minutes,
+                   automation_idle_device_id, automation_idle_action, automation_idle_state,
+                   automation_idle_triggered_epoch, automation_last_event, automation_last_status,
+                   automation_last_response, automation_last_run_at, automation_enabled,
+                   automation_trigger, automation_device_id, automation_action, automation_state,
+                   automation_repeat_mode, automation_repeat_seconds, automation_last_trigger_epoch,
+                   automation_last_condition_key, automation_notify_enabled, automation_notify_contact_ids,
+                   automation_notify_message, device_last_seen_at, device_last_seen_epoch
             FROM sensors
             WHERE sensor_id = ?
             """,
@@ -235,6 +376,425 @@ def coerce_bool(value: object) -> bool:
         return value.strip().lower() in {"1", "true", "on", "yes", "enabled", "ativo"}
     return False
 
+
+def sanitize_action(action: object, default: str = "power") -> str:
+    normalized = str(action or default).strip().lower()
+    return normalized if normalized in {"power", "motion"} else default
+
+
+def sanitize_state_for_action(action: str, state: object, default: str) -> str:
+    normalized = str(state or default).strip().upper()
+    valid_states = {
+        "power": {"ON", "OFF", "1", "0"},
+        "motion": {"DETECTED", "NOT_DETECTED", "ON", "OFF", "1", "0"},
+    }
+    return normalized if normalized in valid_states[action] else default
+
+
+def sanitize_trigger(trigger: object, default: str = "motion") -> str:
+    normalized = str(trigger or default).strip().lower()
+    return normalized if normalized in {"motion", "idle"} else default
+
+
+def sanitize_repeat_mode(mode: object, default: str = "once") -> str:
+    normalized = str(mode or default).strip().lower()
+    return normalized if normalized in {"once", "repeat"} else default
+
+
+def external_api_ready() -> bool:
+    return bool(EXTERNAL_API_BASE_URL and EXTERNAL_API_TOKEN)
+
+
+def is_device_online(sensor: sqlite3.Row | dict, now_epoch: int | None = None) -> bool:
+    sensor_dict = dict(sensor)
+    last_seen_epoch = sensor_dict.get("device_last_seen_epoch")
+    if last_seen_epoch is None:
+        return False
+    reference_epoch = now_epoch if now_epoch is not None else int(app_now().timestamp())
+    return reference_epoch - int(last_seen_epoch) <= DEVICE_HEARTBEAT_TIMEOUT_SECONDS
+
+
+def mark_device_heartbeat(device_id: str) -> dict:
+    normalized = device_id.strip()
+    if not normalized:
+        raise ValueError("device_id_required")
+
+    now = app_now()
+    now_iso = now.isoformat()
+    now_epoch = int(now.timestamp())
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE sensors
+            SET device_last_seen_at = ?,
+                device_last_seen_epoch = ?,
+                updated_at = updated_at
+            WHERE device_id = ?
+            """,
+            (now_iso, now_epoch, normalized),
+        )
+        conn.commit()
+
+    return {
+        "device_id": normalized,
+        "updated_sensors": cursor.rowcount,
+        "last_seen_at": now_iso,
+        "last_seen_epoch": now_epoch,
+    }
+
+
+def update_sensor_automation_status(
+    sensor_id: str,
+    *,
+    event_name: str,
+    status: str,
+    response_text: str,
+    idle_triggered_epoch: int | None = None,
+    last_trigger_epoch: int | None = None,
+    condition_key: str | None = None,
+) -> None:
+    agora = app_now().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE sensors
+            SET automation_last_event = ?,
+                automation_last_status = ?,
+                automation_last_response = ?,
+                automation_last_run_at = ?,
+                automation_idle_triggered_epoch = COALESCE(?, automation_idle_triggered_epoch),
+                automation_last_trigger_epoch = COALESCE(?, automation_last_trigger_epoch),
+                automation_last_condition_key = COALESCE(?, automation_last_condition_key),
+                updated_at = ?
+            WHERE sensor_id = ?
+            """,
+            (
+                event_name,
+                status[:32],
+                response_text[:500],
+                agora,
+                idle_triggered_epoch,
+                last_trigger_epoch,
+                condition_key,
+                agora,
+                sensor_id,
+            ),
+        )
+        conn.commit()
+
+
+def reset_idle_trigger(sensor_id: str) -> None:
+    agora = app_now().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE sensors
+            SET automation_idle_triggered_epoch = NULL,
+                automation_last_trigger_epoch = NULL,
+                automation_last_condition_key = NULL,
+                updated_at = ?
+            WHERE sensor_id = ?
+            """,
+            (agora, sensor_id),
+        )
+        conn.commit()
+
+
+def external_api_request(path: str, method: str = "GET", payload: dict | None = None) -> dict:
+    requires_auth = path.startswith("/api/")
+    if requires_auth and not external_api_ready():
+        raise RuntimeError("external_api_not_configured")
+
+    body = None
+    headers = {}
+    if requires_auth:
+        headers["Authorization"] = f"Bearer {EXTERNAL_API_TOKEN}"
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request = Request(f"{EXTERNAL_API_BASE_URL}{path}", data=body, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=EXTERNAL_API_TIMEOUT_SECONDS, context=EXTERNAL_API_SSL_CONTEXT) as response:
+            raw = response.read().decode("utf-8")
+            content_type = response.headers.get("Content-Type", "")
+            parsed = json.loads(raw) if "json" in content_type.lower() and raw else raw
+            return {"status": response.status, "body": parsed, "text": raw}
+    except HTTPError as exc:
+        error_text = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"http_{exc.code}:{error_text[:300]}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"network_error:{exc.reason}") from exc
+
+
+def moderator_api_ready() -> bool:
+    return bool(MODERATOR_API_BASE_URL and MODERATOR_API_USERNAME and MODERATOR_API_PASSWORD)
+
+
+def moderator_api_request(path: str, method: str = "GET", payload: dict | None = None, *, use_cookie: bool = True) -> dict:
+    if not MODERATOR_API_BASE_URL:
+        raise RuntimeError("moderator_api_not_configured")
+
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if use_cookie and MODERATOR_COOKIE_HEADER:
+        headers["Cookie"] = MODERATOR_COOKIE_HEADER
+
+    request = Request(
+        f"{MODERATOR_API_BASE_URL}{path}",
+        data=body,
+        method=method,
+        headers=headers,
+    )
+    try:
+        with urlopen(request, timeout=MODERATOR_API_TIMEOUT_SECONDS) as response:
+            text = response.read().decode("utf-8", errors="replace")
+            return {
+                "status": response.status,
+                "text": text,
+                "headers": response.headers,
+            }
+    except HTTPError as exc:
+        text = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"moderator_http_{exc.code}: {text[:300]}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"moderator_network_error: {exc.reason}") from exc
+
+
+def moderator_login(force: bool = False) -> None:
+    global MODERATOR_COOKIE_HEADER
+    if not moderator_api_ready():
+        raise RuntimeError("moderator_api_not_configured")
+
+    with MODERATOR_COOKIE_LOCK:
+        if MODERATOR_COOKIE_HEADER and not force:
+            return
+        response = moderator_api_request(
+            "/api/auth/login",
+            "POST",
+            {
+                "username": MODERATOR_API_USERNAME,
+                "password": MODERATOR_API_PASSWORD,
+            },
+            use_cookie=False,
+        )
+        cookies = response["headers"].get_all("Set-Cookie") if hasattr(response["headers"], "get_all") else []
+        cookie_pairs = []
+        for cookie in cookies or []:
+            cookie_pairs.append(cookie.split(";", 1)[0])
+        if not cookie_pairs:
+            raise RuntimeError("moderator_login_without_cookie")
+        MODERATOR_COOKIE_HEADER = "; ".join(cookie_pairs)
+
+
+def get_contacts_by_ids(contact_ids: list[int]) -> list[dict]:
+    if not contact_ids:
+        return []
+    unique_ids = sorted(set(int(item) for item in contact_ids))
+    placeholders = ",".join("?" for _ in unique_ids)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT id, name, phone
+            FROM contacts
+            WHERE id IN ({placeholders})
+            ORDER BY name COLLATE NOCASE ASC, id ASC
+            """,
+            unique_ids,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def build_notification_message(sensor: sqlite3.Row | dict, event_name: str) -> str:
+    sensor_dict = dict(sensor)
+    template = str(sensor_dict.get("automation_notify_message") or "").strip()
+    sensor_name = str(sensor_dict.get("name") or default_sensor_name(sensor_dict["sensor_id"]))
+    event_label = "movimento detectado" if event_name == "motion" else "sem movimento"
+    if not template:
+        template = "Alerta: {event} no sensor {sensor_name}."
+    return template.format(
+        event=event_label,
+        sensor_name=sensor_name,
+        sensor_id=sensor_dict["sensor_id"],
+        device_id=sensor_dict.get("device_id", ""),
+    )
+
+
+def notify_contacts(sensor: sqlite3.Row | dict, event_name: str) -> dict:
+    sensor_dict = dict(sensor)
+    if not bool(sensor_dict.get("automation_notify_enabled")):
+        return {"ok": False, "reason": "notification_disabled"}
+    raw_ids = str(sensor_dict.get("automation_notify_contact_ids") or "")
+    contact_ids = [int(item) for item in raw_ids.split(",") if item.strip().isdigit()]
+    contacts = get_contacts_by_ids(contact_ids)
+    if not contacts:
+        return {"ok": False, "reason": "notification_contacts_not_configured"}
+    if not moderator_api_ready():
+        return {"ok": False, "reason": "moderator_api_not_configured"}
+
+    message = build_notification_message(sensor, event_name)
+    moderator_login()
+    sent = []
+    errors = []
+    for contact in contacts:
+        payload = {
+            "chatId": str(contact["phone"]),
+            "text": message,
+        }
+        try:
+            response = moderator_api_request("/api/messages/send", "POST", payload)
+            sent.append({"contact_id": contact["id"], "phone": contact["phone"], "status": response["status"]})
+        except RuntimeError as exc:
+            if "moderator_http_401" in str(exc):
+                try:
+                    moderator_login(force=True)
+                    response = moderator_api_request("/api/messages/send", "POST", payload)
+                    sent.append({"contact_id": contact["id"], "phone": contact["phone"], "status": response["status"]})
+                    continue
+                except RuntimeError as retry_exc:
+                    errors.append({"contact_id": contact["id"], "error": str(retry_exc)})
+            else:
+                errors.append({"contact_id": contact["id"], "error": str(exc)})
+
+    return {
+        "ok": bool(sent) and not errors,
+        "sent": sent,
+        "errors": errors,
+        "message": message,
+    }
+
+
+def fetch_external_devices(force: bool = False) -> dict:
+    now_ts = time.time()
+    with EXTERNAL_DEVICE_CACHE_LOCK:
+        if (
+            not force
+            and EXTERNAL_DEVICE_CACHE["devices"]
+            and now_ts - float(EXTERNAL_DEVICE_CACHE["fetched_at"]) < EXTERNAL_API_DEVICE_CACHE_SECONDS
+        ):
+            return {
+                "ok": True,
+                "devices": EXTERNAL_DEVICE_CACHE["devices"],
+                "cached": True,
+                "base_url": EXTERNAL_API_BASE_URL,
+            }
+
+    devices: list[dict] = []
+    try:
+        doc_response = external_api_request("/doc/api.json", "GET")
+        doc_body = doc_response["body"] if isinstance(doc_response["body"], dict) else {}
+        doc_devices = doc_body.get("devices", [])
+        capability_index: dict[str, dict] = {}
+        for capability in doc_body.get("capabilities", []):
+            if not isinstance(capability, dict):
+                continue
+            capability_index[str(capability.get("id") or "").strip()] = capability
+
+        for item in doc_devices:
+            if not isinstance(item, dict):
+                continue
+            device_id = str(item.get("id") or item.get("device_id") or "").strip()
+            if not device_id:
+                continue
+            capability = capability_index.get(device_id, {})
+            supported = capability.get("supported", {}) if isinstance(capability, dict) else {}
+            action_states = {}
+            for action_name, action_value in supported.items():
+                if action_name not in {"power", "motion"}:
+                    continue
+                if isinstance(action_value, list):
+                    action_states[action_name] = [str(value).upper() for value in action_value]
+
+            devices.append(
+                {
+                    "device_id": device_id,
+                    "name": str(item.get("friendly_name") or item.get("name") or device_id),
+                    "type": str(item.get("type") or "device"),
+                    "description": str(item.get("description") or ""),
+                    "supported_actions": sorted(action_states.keys()),
+                    "supported_states": action_states,
+                }
+            )
+    except Exception:
+        response = external_api_request("/api/devices", "GET")
+        raw_body = response["body"]
+        if isinstance(raw_body, dict):
+            raw_devices = raw_body.get("devices", raw_body.get("items", []))
+        elif isinstance(raw_body, list):
+            raw_devices = raw_body
+        else:
+            raw_devices = []
+
+        for item in raw_devices:
+            if not isinstance(item, dict):
+                continue
+            device_id = str(item.get("id") or item.get("device_id") or "").strip()
+            if not device_id:
+                continue
+            device_type = str(item.get("type") or item.get("category") or "device")
+            supported_actions = []
+            supported_states = {}
+            if device_type in {"light", "plug"}:
+                supported_actions.append("power")
+                supported_states["power"] = ["ON", "OFF"]
+            if device_type == "motion":
+                supported_actions.append("motion")
+                supported_states["motion"] = ["DETECTED", "NOT_DETECTED"]
+            devices.append(
+                {
+                    "device_id": device_id,
+                    "name": str(item.get("friendly_name") or item.get("name") or device_id),
+                    "type": device_type,
+                    "description": str(item.get("description") or ""),
+                    "supported_actions": supported_actions,
+                    "supported_states": supported_states,
+                }
+            )
+
+    with EXTERNAL_DEVICE_CACHE_LOCK:
+        EXTERNAL_DEVICE_CACHE["fetched_at"] = now_ts
+        EXTERNAL_DEVICE_CACHE["devices"] = devices
+        EXTERNAL_DEVICE_CACHE["error"] = None
+
+    return {
+        "ok": True,
+        "devices": devices,
+        "cached": False,
+        "base_url": EXTERNAL_API_BASE_URL,
+    }
+
+
+def trigger_external_device(sensor: sqlite3.Row | dict, event_name: str) -> dict:
+    sensor_dict = dict(sensor)
+    enabled = bool(sensor_dict.get("automation_enabled"))
+    configured_trigger = sanitize_trigger(sensor_dict.get("automation_trigger"), "motion")
+    action = sanitize_action(sensor_dict.get("automation_action"), "power")
+    default_state = "ON" if configured_trigger == "motion" else "OFF"
+    state = sanitize_state_for_action(action, sensor_dict.get("automation_state"), default_state)
+    target_device_id = str(sensor_dict.get("automation_device_id") or "").strip()
+
+    if not enabled:
+        return {"ok": False, "reason": "automation_disabled"}
+    if configured_trigger != event_name:
+        return {"ok": False, "reason": "event_not_configured"}
+    if not target_device_id:
+        return {"ok": False, "reason": "device_not_configured"}
+    if not external_api_ready():
+        return {"ok": False, "reason": "external_api_not_configured"}
+
+    endpoint = f"/api/device/{target_device_id}/{action}"
+    payload: dict[str, object] = {"state": state}
+    response = external_api_request(endpoint, "POST", payload)
+    return {
+        "ok": True,
+        "device_id": target_device_id,
+        "action": action,
+        "state": state,
+        "status": response["status"],
+        "response": response["text"][:500],
+    }
 
 def list_snapshot_media_files() -> list[Path]:
     if not SNAPSHOTS_DIR.exists():
@@ -413,6 +973,8 @@ def upsert_sensors(payload: dict) -> dict:
             pin = sensor.get("pin")
             name = str(sensor.get("name") or default_sensor_name(sensor_id))
             icon = str(sensor.get("icon") or default_sensor_icon(sensor_id))
+            enabled = coerce_bool(sensor.get("enabled", True))
+            show_on_dashboard = coerce_bool(sensor.get("show_on_dashboard", True))
 
             if not sensor_id:
                 raise ValueError("sensor_id_required")
@@ -421,8 +983,8 @@ def upsert_sensors(payload: dict) -> dict:
 
             conn.execute(
                 """
-                INSERT INTO sensors (sensor_id, device_id, pin, name, icon, enabled, registered_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                INSERT INTO sensors (sensor_id, device_id, pin, name, icon, enabled, show_on_dashboard, registered_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(sensor_id) DO UPDATE SET
                     device_id = excluded.device_id,
                     pin = excluded.pin,
@@ -430,7 +992,7 @@ def upsert_sensors(payload: dict) -> dict:
                     icon = excluded.icon,
                     updated_at = excluded.updated_at
                 """,
-                (sensor_id, device_id, int(pin), name, icon, agora, agora),
+                (sensor_id, device_id, int(pin), name, icon, 1 if enabled else 0, 1 if show_on_dashboard else 0, agora, agora),
             )
             registrados += 1
         conn.commit()
@@ -517,6 +1079,40 @@ def update_sensor_name(sensor_id: str, name: str) -> dict | None:
     }
 
 
+def update_sensor_icon(sensor_id: str, icon_value: str) -> dict | None:
+    sensor = fetch_sensor(sensor_id)
+    if sensor is None:
+        return None
+
+    normalized = sanitize_sensor_icon_value(icon_value, sensor_id)
+    agora = app_now().isoformat()
+    previous_icon = str(sensor["icon"] or "").strip()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE sensors
+            SET icon = ?, updated_at = ?
+            WHERE sensor_id = ?
+            """,
+            (normalized, agora, sensor_id),
+        )
+        conn.commit()
+
+    if previous_icon != normalized:
+        delete_uploaded_sensor_icon(previous_icon)
+
+    sensor = fetch_sensor(sensor_id)
+    resolved_icon = sanitize_sensor_icon_value(sensor["icon"], sensor_id)
+    return {
+        "sensor_id": sensor["sensor_id"],
+        "icon": resolved_icon,
+        "icon_kind": infer_icon_kind(resolved_icon, sensor_id),
+        "icon_url": sensor_icon_url(resolved_icon, sensor_id),
+        "updated_at": sensor["updated_at"],
+    }
+
+
 def delete_sensor(sensor_id: str) -> dict | None:
     sensor = fetch_sensor(sensor_id)
     if sensor is None:
@@ -580,6 +1176,252 @@ def update_sensor_schedule(payload: dict) -> dict | None:
     return dict(fetch_sensor(sensor_id))
 
 
+def update_sensor_automation(payload: dict) -> dict | None:
+    sensor_id = str(payload.get("sensor_id", "")).strip()
+    if fetch_sensor(sensor_id) is None:
+        return None
+
+    automation_enabled = coerce_bool(payload.get("automation_enabled", False))
+    automation_trigger = sanitize_trigger(payload.get("automation_trigger"), "motion")
+    automation_device_id = str(payload.get("automation_device_id", "")).strip()
+    automation_action = sanitize_action(payload.get("automation_action"), "power")
+    default_state = "ON" if automation_trigger == "motion" else "OFF"
+    automation_state = sanitize_state_for_action(automation_action, payload.get("automation_state"), default_state)
+    automation_repeat_mode = sanitize_repeat_mode(payload.get("automation_repeat_mode"), "once")
+    automation_notify_enabled = coerce_bool(payload.get("automation_notify_enabled", False))
+    raw_contact_ids = payload.get("automation_notify_contact_ids", [])
+    if isinstance(raw_contact_ids, list):
+        contact_ids: list[int] = []
+        for item in raw_contact_ids:
+            try:
+                contact_ids.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        automation_notify_contact_ids = ",".join(str(contact_id) for contact_id in sorted(set(contact_ids)))
+    else:
+        automation_notify_contact_ids = ""
+    automation_notify_message = str(payload.get("automation_notify_message", "") or "").strip()
+    try:
+        automation_idle_minutes = max(1, int(payload.get("automation_idle_minutes", 10)))
+    except (TypeError, ValueError):
+        automation_idle_minutes = 10
+    try:
+        automation_repeat_seconds = max(1, int(payload.get("automation_repeat_seconds", 30)))
+    except (TypeError, ValueError):
+        automation_repeat_seconds = 30
+
+    agora = app_now().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE sensors
+            SET automation_motion_enabled = ?,
+                automation_motion_device_id = ?,
+                automation_motion_action = ?,
+                automation_motion_state = ?,
+                automation_idle_enabled = ?,
+                automation_idle_minutes = ?,
+                automation_idle_device_id = ?,
+                automation_idle_action = ?,
+                automation_idle_state = ?,
+                automation_idle_triggered_epoch = NULL,
+                automation_enabled = ?,
+                automation_trigger = ?,
+                automation_device_id = ?,
+                automation_action = ?,
+                automation_state = ?,
+                automation_repeat_mode = ?,
+                automation_repeat_seconds = ?,
+                automation_notify_enabled = ?,
+                automation_notify_contact_ids = ?,
+                automation_notify_message = ?,
+                automation_last_trigger_epoch = NULL,
+                automation_last_condition_key = NULL,
+                updated_at = ?
+            WHERE sensor_id = ?
+            """,
+            (
+                0,
+                "",
+                "power",
+                "ON",
+                0,
+                automation_idle_minutes,
+                "",
+                "power",
+                "OFF",
+                1 if automation_enabled else 0,
+                automation_trigger,
+                automation_device_id,
+                automation_action,
+                automation_state,
+                automation_repeat_mode,
+                automation_repeat_seconds,
+                1 if automation_notify_enabled else 0,
+                automation_notify_contact_ids,
+                automation_notify_message,
+                agora,
+                sensor_id,
+            ),
+        )
+        conn.commit()
+
+    updated = fetch_sensor(sensor_id)
+    return dict(updated) if updated else None
+
+
+def should_run_automation(sensor: sqlite3.Row | dict, event_name: str, condition_key: str, now_epoch: int) -> bool:
+    sensor_dict = dict(sensor)
+    if not bool(sensor_dict.get("automation_enabled")):
+        return False
+    if sanitize_trigger(sensor_dict.get("automation_trigger"), "motion") != event_name:
+        return False
+
+    repeat_mode = sanitize_repeat_mode(sensor_dict.get("automation_repeat_mode"), "once")
+    last_condition_key = str(sensor_dict.get("automation_last_condition_key") or "")
+    last_trigger_epoch = sensor_dict.get("automation_last_trigger_epoch")
+
+    if repeat_mode == "once":
+        return last_condition_key != condition_key
+
+    try:
+        repeat_seconds = max(1, int(sensor_dict.get("automation_repeat_seconds") or 30))
+    except (TypeError, ValueError):
+        repeat_seconds = 30
+
+    if last_condition_key != condition_key:
+        return True
+    if last_trigger_epoch is None:
+        return True
+    return now_epoch - int(last_trigger_epoch) >= repeat_seconds
+
+
+def evaluate_and_run_sensor_automation(
+    sensor: sqlite3.Row | dict,
+    event_name: str,
+    now: datetime,
+    *,
+    force: bool = False,
+) -> dict:
+    sensor_dict = dict(sensor)
+    schedule_allowed, _reason = evaluate_sensor_schedule(sensor, now)
+    if not schedule_allowed:
+        return {"ok": False, "reason": "schedule_blocked"}
+
+    now_epoch = int(now.timestamp())
+    if event_name == "idle" and not is_device_online(sensor_dict, now_epoch):
+        return {"ok": False, "reason": "device_offline"}
+
+    last_motion = fetch_last_movement(sensor_dict["sensor_id"])
+    if last_motion is None:
+        return {"ok": False, "reason": "no_motion_history"}
+
+    last_motion_epoch = int(last_motion[0])
+
+    if event_name == "motion":
+        if now_epoch - last_motion_epoch > RECENT_MOTION_SECONDS:
+            return {"ok": False, "reason": "condition_inactive"}
+        condition_key = f"motion:{last_motion_epoch}"
+    else:
+        idle_threshold = max(1, int(sensor_dict.get("automation_idle_minutes") or 10)) * 60
+        if now_epoch - last_motion_epoch < idle_threshold:
+            return {"ok": False, "reason": "condition_inactive"}
+        condition_key = f"idle:{last_motion_epoch}"
+
+    if not force and not should_run_automation(sensor, event_name, condition_key, now_epoch):
+        return {"ok": False, "reason": "repeat_window_active"}
+
+    device_result = trigger_external_device(sensor, event_name)
+    notify_result = notify_contacts(sensor, event_name)
+    actionable_results = [
+        item
+        for item in (device_result, notify_result)
+        if item.get("reason") not in {"device_not_configured", "external_api_not_configured", "notification_disabled", "notification_contacts_not_configured", "moderator_api_not_configured"}
+    ]
+    success = bool(device_result.get("ok") or notify_result.get("ok"))
+    result = {
+        "ok": success,
+        "device": device_result,
+        "notification": notify_result,
+        "response": f"device={device_result}; notification={notify_result}",
+    }
+    if success:
+        update_sensor_automation_status(
+            sensor_dict["sensor_id"],
+            event_name=event_name,
+            status="success",
+            response_text=result.get("response", ""),
+            idle_triggered_epoch=now_epoch if event_name == "idle" else None,
+            last_trigger_epoch=now_epoch,
+            condition_key=condition_key,
+        )
+    elif actionable_results:
+        update_sensor_automation_status(
+            sensor_dict["sensor_id"],
+            event_name=event_name,
+            status="skipped",
+            response_text=result.get("response", ""),
+            idle_triggered_epoch=now_epoch if event_name == "idle" else None,
+            last_trigger_epoch=now_epoch,
+            condition_key=condition_key,
+        )
+    return result
+
+
+def run_idle_automation_checks() -> None:
+    now = app_now()
+    now_epoch = int(now.timestamp())
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT sensor_id
+            FROM sensors
+            WHERE enabled = 1
+              AND automation_enabled = 1
+              AND COALESCE(TRIM(automation_device_id), '') != ''
+            """
+        ).fetchall()
+
+    for row in rows:
+        sensor = fetch_sensor(row["sensor_id"])
+        if sensor is None:
+            continue
+
+        sensor_dict = dict(sensor)
+
+        schedule_allowed, _reason = evaluate_sensor_schedule(sensor, now)
+        if not schedule_allowed:
+            continue
+
+        try:
+            trigger_name = sanitize_trigger(sensor_dict.get("automation_trigger"), "motion")
+            evaluate_and_run_sensor_automation(sensor, trigger_name, now)
+        except Exception as exc:
+            update_sensor_automation_status(
+                sensor["sensor_id"],
+                event_name=sanitize_trigger(sensor_dict.get("automation_trigger"), "motion"),
+                status="error",
+                response_text=str(exc),
+                idle_triggered_epoch=now_epoch if sanitize_trigger(sensor_dict.get("automation_trigger"), "motion") == "idle" else None,
+            )
+
+
+def automation_worker() -> None:
+    while True:
+        time.sleep(AUTOMATION_LOOP_SECONDS)
+        try:
+            run_idle_automation_checks()
+        except Exception as exc:
+            print(f"Erro no worker de automacao: {exc}", flush=True)
+
+
+def start_automation_worker() -> None:
+    thread = threading.Thread(target=automation_worker, daemon=True)
+    thread.start()
+
+
 def set_all_sensors_enabled(enabled: bool) -> dict:
     agora = app_now().isoformat()
     with sqlite3.connect(DB_PATH) as conn:
@@ -596,6 +1438,45 @@ def set_all_sensors_enabled(enabled: bool) -> dict:
         "enabled": enabled,
         "updated_at": agora,
     }
+
+
+def evaluate_sensor_schedule(sensor: sqlite3.Row | dict, current_time: datetime | None = None) -> tuple[bool, str]:
+    agora = current_time or app_now()
+    sensor_dict = dict(sensor)
+    mode = sensor_dict.get("schedule_mode") or "always"
+    if mode != "custom":
+        return True, "schedule_allowed"
+
+    weekday_map = (6, 0, 1, 2, 3, 4, 5)
+    wd = str(weekday_map[agora.weekday()])
+    days = sensor_dict.get("schedule_days") or "0,1,2,3,4,5,6"
+    if wd not in days.split(","):
+        return False, "schedule_day_blocked"
+
+    alt = sensor_dict.get("schedule_alternate") or "none"
+    if alt == "even" and agora.day % 2 != 0:
+        return False, "schedule_alternate_blocked"
+    if alt == "odd" and agora.day % 2 == 0:
+        return False, "schedule_alternate_blocked"
+
+    start_str = sensor_dict.get("schedule_start") or "00:00"
+    end_str = sensor_dict.get("schedule_end") or "23:59"
+    cur_mins = agora.hour * 60 + agora.minute
+
+    def to_minutes(value: str) -> int:
+        parts = value.split(":")
+        return int(parts[0]) * 60 + int(parts[1]) if len(parts) == 2 else 0
+
+    start_mins = to_minutes(start_str)
+    end_mins = to_minutes(end_str)
+    if start_mins <= end_mins:
+        if not (start_mins <= cur_mins <= end_mins):
+            return False, "schedule_time_blocked"
+    else:
+        if not (cur_mins >= start_mins or cur_mins <= end_mins):
+            return False, "schedule_time_blocked"
+
+    return True, "schedule_allowed"
 
 
 def build_time_bins(range_key: str) -> tuple[int, int, str]:
@@ -627,37 +1508,9 @@ def insert_movement(payload: dict) -> dict:
         }
 
     agora = app_now()
-    
-    # Schedule Logic
-    s_dict = dict(sensor)
-    mode = s_dict.get("schedule_mode") or "always"
-    if mode == "custom":
-        wd = str(agora.weekday())
-        days = s_dict.get("schedule_days") or "0,1,2,3,4,5,6"
-        if wd not in days.split(","):
-            return {"stored": False, "reason": "schedule_day_blocked", "sensor_id": sensor_id}
-            
-        alt = s_dict.get("schedule_alternate") or "none"
-        if alt == "even" and agora.day % 2 != 0:
-            return {"stored": False, "reason": "schedule_alternate_blocked", "sensor_id": sensor_id}
-        if alt == "odd" and agora.day % 2 == 0:
-            return {"stored": False, "reason": "schedule_alternate_blocked", "sensor_id": sensor_id}
-            
-        start_str = s_dict.get("schedule_start") or "00:00"
-        end_str = s_dict.get("schedule_end") or "23:59"
-        cur_mins = agora.hour * 60 + agora.minute
-        
-        def to_m(t):
-            p = t.split(":")
-            return int(p[0])*60 + int(p[1]) if len(p) == 2 else 0
-            
-        s_mins, e_mins = to_m(start_str), to_m(end_str)
-        if s_mins <= e_mins:
-            if not (s_mins <= cur_mins <= e_mins):
-                return {"stored": False, "reason": "schedule_time_blocked", "sensor_id": sensor_id}
-        else:
-            if not (cur_mins >= s_mins or cur_mins <= e_mins):
-                return {"stored": False, "reason": "schedule_time_blocked", "sensor_id": sensor_id}
+    schedule_allowed, schedule_reason = evaluate_sensor_schedule(sensor, agora)
+    if not schedule_allowed:
+        return {"stored": False, "reason": schedule_reason, "sensor_id": sensor_id}
 
     agora_epoch = int(agora.timestamp())
     ocorrido_em = agora.isoformat()
@@ -692,6 +1545,20 @@ def insert_movement(payload: dict) -> dict:
             daemon=True
         ).start()
 
+    reset_idle_trigger(sensor_id)
+
+    try:
+        updated_sensor = fetch_sensor(sensor_id) or sensor
+        if sanitize_trigger(dict(updated_sensor).get("automation_trigger"), "motion") == "motion":
+            evaluate_and_run_sensor_automation(updated_sensor, "motion", agora, force=True)
+    except Exception as exc:
+        update_sensor_automation_status(
+            sensor_id,
+            event_name="motion",
+            status="error",
+            response_text=str(exc),
+        )
+
     return {
         "stored": True,
         "sensor_id": sensor_id,
@@ -714,6 +1581,8 @@ def list_sensors(limit: int) -> list[dict]:
                 COALESCE(s.icon, 'motion') AS icon,
                 s.enabled,
                 s.show_on_dashboard,
+                s.device_last_seen_at,
+                s.device_last_seen_epoch,
                 s.registered_at,
                 s.updated_at,
                 (
@@ -738,11 +1607,72 @@ def list_sensors(limit: int) -> list[dict]:
         ).fetchall()
 
     output = []
+    now_epoch = int(app_now().timestamp())
     for row in rows:
         item = dict(row)
         item["enabled"] = bool(item["enabled"])
+        item["icon"] = sanitize_sensor_icon_value(item.get("icon"), item["sensor_id"])
+        item["icon_kind"] = infer_icon_kind(item["icon"], item["sensor_id"])
+        item["icon_url"] = sensor_icon_url(item["icon"], item["sensor_id"])
+        item["device_online"] = is_device_online(item, now_epoch)
         output.append(item)
     return output
+
+
+def list_contacts() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, name, phone, created_at, updated_at
+            FROM contacts
+            ORDER BY name COLLATE NOCASE ASC, id ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_contact(name: str, phone: str) -> dict:
+    normalized_name = str(name or "").strip()
+    normalized_phone = str(phone or "").strip()
+    if not normalized_name:
+        raise ValueError("contact_name_required")
+    if not normalized_phone:
+        raise ValueError("contact_phone_required")
+
+    now_iso = app_now().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO contacts (name, phone, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (normalized_name, normalized_phone, now_iso, now_iso),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            raise ValueError("contact_phone_already_exists")
+
+        row = conn.execute(
+            "SELECT id, name, phone, created_at, updated_at FROM contacts WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+    return dict(row)
+
+
+def delete_contact(contact_id: int) -> dict | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT id, name, phone FROM contacts WHERE id = ?",
+            (contact_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+        conn.commit()
+    return dict(row)
 
 
 def list_movements(limit: int) -> list[dict]:
@@ -842,11 +1772,15 @@ def get_sensor_detail(sensor_id: str, range_key: str) -> dict | None:
 
     sensor_dict = dict(sensor)
     sensor_dict["enabled"] = bool(sensor_dict["enabled"])
+    sensor_dict["device_online"] = is_device_online(sensor_dict, now_epoch)
     recent_motion = last_motion_epoch is not None and now_epoch - last_motion_epoch <= RECENT_MOTION_SECONDS
 
     if not sensor_dict["enabled"]:
         tone = "inactive"
         status_label = "INATIVO"
+    elif not sensor_dict["device_online"]:
+        tone = "warning"
+        status_label = "OFFLINE"
     elif recent_motion:
         tone = "alert"
         status_label = "MOVIMENTO"
@@ -861,7 +1795,9 @@ def get_sensor_detail(sensor_id: str, range_key: str) -> dict | None:
             "device_id": sensor_dict["device_id"],
             "pin": sensor_dict["pin"],
             "name": sensor_dict["name"] or default_sensor_name(sensor_dict["sensor_id"]),
-            "icon": sensor_dict["icon"] or default_sensor_icon(sensor_dict["sensor_id"]),
+            "icon": sanitize_sensor_icon_value(sensor_dict["icon"], sensor_dict["sensor_id"]),
+            "icon_kind": infer_icon_kind(sensor_dict["icon"] or "", sensor_dict["sensor_id"]),
+            "icon_url": sensor_icon_url(sensor_dict["icon"] or "", sensor_dict["sensor_id"]),
             "enabled": sensor_dict["enabled"],
             "rtsp_url": sensor_dict.get("rtsp_url", ""),
             "schedule_mode": sensor_dict.get("schedule_mode", "always"),
@@ -870,6 +1806,36 @@ def get_sensor_detail(sensor_id: str, range_key: str) -> dict | None:
             "schedule_days": sensor_dict.get("schedule_days", "0,1,2,3,4,5,6"),
             "schedule_alternate": sensor_dict.get("schedule_alternate", "none"),
             "show_on_dashboard": bool(sensor_dict.get("show_on_dashboard", 1)),
+            "automation_motion_enabled": bool(sensor_dict.get("automation_motion_enabled", 0)),
+            "automation_motion_device_id": sensor_dict.get("automation_motion_device_id", "") or "",
+            "automation_motion_action": sensor_dict.get("automation_motion_action", "power") or "power",
+            "automation_motion_state": sensor_dict.get("automation_motion_state", "ON") or "ON",
+            "automation_idle_enabled": bool(sensor_dict.get("automation_idle_enabled", 0)),
+            "automation_idle_minutes": int(sensor_dict.get("automation_idle_minutes", 10) or 10),
+            "automation_idle_device_id": sensor_dict.get("automation_idle_device_id", "") or "",
+            "automation_idle_action": sensor_dict.get("automation_idle_action", "power") or "power",
+            "automation_idle_state": sensor_dict.get("automation_idle_state", "OFF") or "OFF",
+            "automation_last_event": sensor_dict.get("automation_last_event", "") or "",
+            "automation_last_status": sensor_dict.get("automation_last_status", "") or "",
+            "automation_last_response": sensor_dict.get("automation_last_response", "") or "",
+            "automation_last_run_at": sensor_dict.get("automation_last_run_at", "") or "",
+            "automation_enabled": bool(sensor_dict.get("automation_enabled", 0)),
+            "automation_trigger": sensor_dict.get("automation_trigger", "motion") or "motion",
+            "automation_device_id": sensor_dict.get("automation_device_id", "") or "",
+            "automation_action": sensor_dict.get("automation_action", "power") or "power",
+            "automation_state": sensor_dict.get("automation_state", "ON") or "ON",
+            "automation_repeat_mode": sensor_dict.get("automation_repeat_mode", "once") or "once",
+            "automation_repeat_seconds": int(sensor_dict.get("automation_repeat_seconds", 30) or 30),
+            "automation_notify_enabled": bool(sensor_dict.get("automation_notify_enabled", 0)),
+            "automation_notify_contact_ids": [
+                int(item)
+                for item in str(sensor_dict.get("automation_notify_contact_ids", "") or "").split(",")
+                if item.strip().isdigit()
+            ],
+            "automation_notify_message": sensor_dict.get("automation_notify_message", "") or "",
+            "device_online": sensor_dict["device_online"],
+            "device_last_seen_at": sensor_dict.get("device_last_seen_at", "") or "",
+            "device_last_seen_epoch": sensor_dict.get("device_last_seen_epoch"),
             "status_label": status_label,
             "tone": tone,
             "registered_at": sensor_dict["registered_at"],
@@ -925,14 +1891,18 @@ def build_dashboard_payload() -> dict:
             bins[idx] += 1
 
         recent_motion = sensor["last_motion_epoch"] is not None and agora_epoch - int(sensor["last_motion_epoch"]) <= RECENT_MOTION_SECONDS
+        device_online = bool(sensor.get("device_online"))
         if sensor["enabled"]:
             enabled_count += 1
-        if sensor["enabled"] and recent_motion:
+        if sensor["enabled"] and device_online and recent_motion:
             moving_count += 1
 
         if not sensor["enabled"]:
             tone = "inactive"
             status_label = "INATIVO"
+        elif not device_online:
+            tone = "warning"
+            status_label = "OFFLINE"
         elif recent_motion:
             tone = "alert"
             status_label = "MOVIMENTO"
@@ -947,7 +1917,10 @@ def build_dashboard_payload() -> dict:
                 "pin": sensor["pin"],
                 "name": sensor["name"],
                 "icon": sensor["icon"],
+                "icon_kind": sensor.get("icon_kind", infer_icon_kind(sensor["icon"], sensor["sensor_id"])),
+                "icon_url": sensor.get("icon_url", sensor_icon_url(sensor["icon"], sensor["sensor_id"])),
                 "enabled": sensor["enabled"],
+                "device_online": device_online,
                 "show_on_dashboard": bool(sensor["show_on_dashboard"]),
                 "status_label": status_label,
                 "tone": tone,
@@ -1067,6 +2040,20 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
             return
 
+        if parsed.path.startswith("/sensor-icons/"):
+            filename = parsed.path.replace("/sensor-icons/", "", 1)
+            filepath = SENSOR_ICONS_DIR / Path(filename).name
+            if filepath.exists() and filepath.is_file():
+                self.send_response(HTTPStatus.OK)
+                mt, _ = mimetypes.guess_type(str(filepath))
+                self.send_header("Content-Type", mt or "application/octet-stream")
+                self.end_headers()
+                with open(filepath, "rb") as f:
+                    self.wfile.write(f.read())
+            else:
+                self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
+            return
+
         if parsed.path == "/sensor":
             sensor_id = params.get("sensor_id", [""])[0].strip()
             if not sensor_id:
@@ -1091,6 +2078,7 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                     "service": "sensor-hub-api",
                     "db_path": str(DB_PATH),
                     "cooldown_seconds": COOLDOWN_SECONDS,
+                    "device_heartbeat_timeout_seconds": DEVICE_HEARTBEAT_TIMEOUT_SECONDS,
                     "timezone": "UTC-3",
                 },
             )
@@ -1102,6 +2090,28 @@ class SensorHubHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/dashboard":
             self._send_json(HTTPStatus.OK, build_dashboard_payload())
+            return
+
+        if parsed.path == "/api/contacts":
+            self._send_json(HTTPStatus.OK, {"ok": True, "contacts": list_contacts()})
+            return
+
+        if parsed.path == "/api/external/devices":
+            force = coerce_bool(params.get("refresh", ["false"])[0])
+            try:
+                payload = fetch_external_devices(force=force)
+                payload["configured"] = external_api_ready()
+                self._send_json(HTTPStatus.OK, payload)
+            except Exception as exc:
+                self._send_json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {
+                        "ok": False,
+                        "configured": external_api_ready(),
+                        "error": str(exc),
+                        "base_url": EXTERNAL_API_BASE_URL,
+                    },
+                )
             return
 
         if parsed.path == "/api/sensors/movements":
@@ -1198,6 +2208,15 @@ class SensorHubHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.CREATED, {"ok": True, **result})
             return
 
+        if parsed.path == "/devices/heartbeat":
+            try:
+                result = mark_device_heartbeat(str(payload.get("device_id", "")))
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            return
+
         if parsed.path == "/movements":
             try:
                 result = insert_movement(payload)
@@ -1268,6 +2287,65 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, {"ok": True, **result})
             return
 
+        if parsed.path == "/api/sensors/icon":
+            sensor_id = str(payload.get("sensor_id", "")).strip()
+            icon_mode = str(payload.get("icon_mode", "builtin")).strip().lower()
+            if not sensor_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "sensor_id_required"})
+                return
+
+            try:
+                if icon_mode == "fa":
+                    fa_name = str(payload.get("fa_icon", "")).strip()
+                    if not fa_name:
+                        raise ValueError("fa_icon_required")
+                    icon_value = f"fa:{fa_name}"
+                elif icon_mode == "upload":
+                    icon_value = store_uploaded_sensor_icon(
+                        sensor_id,
+                        str(payload.get("file_name", "")).strip(),
+                        str(payload.get("file_base64", "")).strip(),
+                    )
+                else:
+                    builtin_icon = str(payload.get("builtin_icon", "")).strip()
+                    icon_value = builtin_icon if builtin_icon in ICON_BUILTIN_NAMES else default_sensor_icon(sensor_id)
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+                return
+
+            result = update_sensor_icon(sensor_id, icon_value)
+            if result is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "sensor_not_found"})
+            else:
+                self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            return
+
+        if parsed.path == "/api/contacts/create":
+            try:
+                result = create_contact(
+                    str(payload.get("name", "")),
+                    str(payload.get("phone", "")),
+                )
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(HTTPStatus.CREATED, {"ok": True, "contact": result})
+            return
+
+        if parsed.path == "/api/contacts/delete":
+            contact_id_raw = payload.get("contact_id")
+            try:
+                contact_id = int(contact_id_raw)
+            except (TypeError, ValueError):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "contact_id_required"})
+                return
+            result = delete_contact(contact_id)
+            if result is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "contact_not_found"})
+            else:
+                self._send_json(HTTPStatus.OK, {"ok": True, "contact": result})
+            return
+
         if parsed.path == "/api/sensors/rtsp":
             sensor_id = str(payload.get("sensor_id", "")).strip()
             rtsp_url = str(payload.get("rtsp_url", "")).strip()
@@ -1296,6 +2374,44 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(e)})
             return
 
+        if parsed.path == "/api/sensors/automation":
+            try:
+                result = update_sensor_automation(payload)
+                if result is None:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "sensor_not_found"})
+                else:
+                    self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            except Exception as e:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(e)})
+            return
+
+        if parsed.path == "/api/sensors/automation/test":
+            sensor_id = str(payload.get("sensor_id", "")).strip()
+            event_name = sanitize_trigger(payload.get("event", "motion"), "motion")
+            if not sensor_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "sensor_id_required"})
+                return
+            sensor = fetch_sensor(sensor_id)
+            if sensor is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "sensor_not_found"})
+                return
+
+            try:
+                result = evaluate_and_run_sensor_automation(sensor, event_name, app_now(), force=True)
+                if result.get("ok"):
+                    self._send_json(HTTPStatus.OK, {"ok": True, **result})
+                else:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, **result})
+            except Exception as e:
+                update_sensor_automation_status(
+                    sensor_id,
+                    event_name=event_name,
+                    status="error",
+                    response_text=str(e),
+                )
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"ok": False, "error": str(e)})
+            return
+
         if parsed.path == "/api/system/state":
             enabled = coerce_bool(payload.get("enabled", False))
             result = set_all_sensors_enabled(enabled)
@@ -1312,6 +2428,7 @@ class SensorHubHandler(BaseHTTPRequestHandler):
 def main() -> None:
     init_db()
     start_snapshot_cleanup()
+    start_automation_worker()
     server = ThreadingHTTPServer((HOST, PORT), SensorHubHandler)
     print(f"Servidor escutando em http://{HOST}:{PORT}", flush=True)
     print(f"Banco SQLite: {DB_PATH}", flush=True)

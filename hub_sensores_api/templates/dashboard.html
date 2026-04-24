@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <style>
     :root {
       --bg-dark: #0a0b10;
@@ -213,6 +214,16 @@
       stroke-linecap: round;
       stroke-linejoin: round;
     }
+    .icon-box i {
+      font-size: 24px;
+      line-height: 1;
+    }
+    .icon-box img {
+      width: 28px;
+      height: 28px;
+      object-fit: contain;
+      display: block;
+    }
 
     .sensor-name {
       margin: 0 0 6px 0;
@@ -403,6 +414,7 @@
       .config-inputs { flex-direction: column; }
       .config-inputs .btn-save, .config-inputs .btn-test { width: 100%; }
       .card-header { flex-direction: column; align-items: flex-start; gap: 12px; }
+      .contact-form { grid-template-columns: 1fr; }
     }
 
     .modal-overlay {
@@ -449,6 +461,52 @@
     }
     details.config-group[open] summary::after { transform: rotate(180deg); }
     .config-group-content { padding: 0 16px 16px 16px; }
+    .contact-form {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+      gap: 10px;
+      margin-bottom: 16px;
+      align-items: end;
+    }
+    .contact-form input {
+      width: 100%;
+      padding: 10px 12px;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      color: #fff;
+      font-family: inherit;
+    }
+    .contact-form input:focus {
+      outline: none;
+      border-color: var(--blue);
+    }
+    .contact-list { display: grid; gap: 10px; }
+    .contact-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .contact-row-main { min-width: 0; }
+    .contact-name { font-weight: 600; color: #fff; }
+    .contact-phone { color: var(--text-muted); font-size: 0.92rem; }
+    .contact-empty { color: var(--text-muted); font-size: 0.95rem; padding: 6px 0 2px; }
+    .btn-inline-danger {
+      border: 1px solid rgba(239, 68, 68, 0.45);
+      background: rgba(239, 68, 68, 0.16);
+      color: #fecaca;
+      border-radius: 999px;
+      padding: 8px 14px;
+      cursor: pointer;
+      font-weight: 600;
+      font-family: inherit;
+    }
+    .btn-inline-danger:hover { background: rgba(239, 68, 68, 0.28); color: #fff; }
   </style>
 </head>
 <body>
@@ -466,11 +524,6 @@
           <button id="btn-close-config" class="btn-close">&times;</button>
         </div>
         
-        <details class="config-group" open>
-          <summary>📹 Câmeras de Vigilância</summary>
-          <div class="config-group-content" id="config-list">Carregando câmeras...</div>
-        </details>
-        
         <details class="config-group">
           <summary>⚙️ Preferências Gerais</summary>
           <div class="config-group-content">
@@ -482,6 +535,18 @@
               <span style="color:#fff;">Ver todos os sensores (incluir ocultos)</span>
             </div>
             <p style="color:var(--text-muted); font-size:0.9rem;">Sensores ocultos não aparecem no painel frontal por padrão.</p>
+          </div>
+        </details>
+        <details class="config-group">
+          <summary>Contatos</summary>
+          <div class="config-group-content">
+            <div class="contact-form">
+              <input id="contact-name" type="text" placeholder="Nome da pessoa">
+              <input id="contact-phone" type="text" placeholder="Numero de telefone">
+              <button id="save-contact" class="details-link" type="button">Salvar</button>
+            </div>
+            <div id="contact-feedback" style="font-size:0.9rem; min-height:20px; color:var(--text-muted); margin-bottom:10px;"></div>
+            <div id="contact-list" class="contact-list"></div>
           </div>
         </details>
       </div>
@@ -526,6 +591,19 @@
         .replaceAll("'", '&#39;');
     }
 
+    function renderSensorIcon(sensor) {
+      const iconValue = sensor.icon || 'motion';
+      if (sensor.icon_kind === 'upload' && sensor.icon_url) {
+        return `<img src="${escapeHtml(sensor.icon_url)}" alt="">`;
+      }
+      if (sensor.icon_kind === 'fa' && iconValue.startsWith('fa:')) {
+        const faClass = iconValue.slice(3).trim();
+        const normalized = faClass.startsWith('fa-') ? `fa-solid ${faClass}` : faClass;
+        return `<i class="${escapeHtml(normalized)}" aria-hidden="true"></i>`;
+      }
+      return iconMap[iconValue] || iconMap.motion;
+    }
+
     function renderBars(bins, tone) {
       const max = Math.max(...bins, 1);
       return bins.map((count) => {
@@ -545,6 +623,41 @@
         throw new Error(data.error || 'request_failed');
       }
       return data;
+    }
+
+    function renderContacts(contacts) {
+      const listEl = document.getElementById('contact-list');
+      if (!contacts.length) {
+        listEl.innerHTML = '<div class="contact-empty">Nenhum contato cadastrado.</div>';
+        return;
+      }
+      listEl.innerHTML = contacts.map((contact) => `
+        <div class="contact-row">
+          <div class="contact-row-main">
+            <div class="contact-name">${escapeHtml(contact.name)}</div>
+            <div class="contact-phone">${escapeHtml(contact.phone)}</div>
+          </div>
+          <button class="btn-inline-danger" type="button" onclick="deleteContact(${Number(contact.id)})">Remover</button>
+        </div>
+      `).join('');
+    }
+
+    async function loadContacts() {
+      const feedback = document.getElementById('contact-feedback');
+      const listEl = document.getElementById('contact-list');
+      listEl.innerHTML = '<div class="contact-empty">Carregando contatos...</div>';
+      try {
+        const response = await fetch('/api/contacts');
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error || 'request_failed');
+        }
+        renderContacts(data.contacts || []);
+      } catch (error) {
+        feedback.textContent = 'Falha ao carregar contatos.';
+        feedback.style.color = 'var(--danger)';
+        listEl.innerHTML = '<div class="contact-empty">Nao foi possivel carregar os contatos.</div>';
+      }
     }
 
     // Attach event listeners for a specific card toggle
@@ -584,7 +697,7 @@
           <article class="card tone-${sensor.tone}" style="cursor:pointer;" onclick="if(!event.target.closest('.switch')) window.location.href='/sensor?sensor_id=${encodeURIComponent(sensor.sensor_id)}'">
             <div class="card-header">
               <div class="sensor-meta">
-                <div class="icon-box">${iconMap[sensor.icon] || iconMap.motion}</div>
+                <div class="icon-box">${renderSensorIcon(sensor)}</div>
                 <div>
                   <h2 class="sensor-name">${escapeHtml(sensor.name)}</h2>
                   <div class="sensor-status tone-${sensor.tone}">
@@ -621,6 +734,7 @@
           }
           
           card.querySelector('.sensor-name').textContent = sensor.name;
+          card.querySelector('.icon-box').innerHTML = renderSensorIcon(sensor);
           
           const statusDiv = card.querySelector('.sensor-status');
           statusDiv.className = `sensor-status tone-${sensor.tone}`;
@@ -658,28 +772,9 @@
 
     // Modal global config logic
     const configModal = document.getElementById('config-modal');
-    document.getElementById('btn-config').addEventListener('click', async () => {
+    document.getElementById('btn-config').addEventListener('click', () => {
       configModal.classList.add('active');
-      const listEl = document.getElementById('config-list');
-      listEl.innerHTML = '<div style="text-align:center; color:var(--text-muted);">Carregando sensores...</div>';
-      try {
-        const res = await fetch('/sensors');
-        const data = await res.json();
-        listEl.innerHTML = data.sensors.map(s => `
-          <div class="config-row">
-            <h3><span class="dot tone-${s.enabled?'active':'inactive'}"></span> ${s.name} <small style="color:var(--text-muted);font-weight:300">(${s.sensor_id})</small></h3>
-            <div class="config-inputs">
-              <input type="text" id="rtsp-${s.sensor_id}" placeholder="rtsp://admin:123456@192.168.1.100/stream" value="${s.rtsp_url || ''}">
-              <button class="btn-save" onclick="saveRtsp('${s.sensor_id}')">Salvar</button>
-              <button class="btn-test" onclick="testRtsp('${s.sensor_id}')">Testar</button>
-            </div>
-            <div id="feedback-${s.sensor_id}" style="font-size: 0.85rem; margin-bottom: 8px; min-height: 20px;"></div>
-            <img id="img-${s.sensor_id}" class="test-preview" src="">
-          </div>
-        `).join('');
-      } catch(e) {
-        listEl.innerHTML = '<div style="text-align:center; color:var(--danger);">Erro ao carregar câmeras da central.</div>';
-      }
+      loadContacts();
     });
 
     document.getElementById('btn-close-config').addEventListener('click', () => {
@@ -692,49 +787,46 @@
       }
     });
 
-    window.saveRtsp = async (sensorId) => {
-      const url = document.getElementById(`rtsp-${sensorId}`).value.trim();
-      const fb = document.getElementById(`feedback-${sensorId}`);
-      fb.textContent = 'Salvando...'; fb.style.color = 'var(--text-muted)';
-      try {
-        const res = await fetch('/api/sensors/rtsp', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ sensor_id: sensorId, rtsp_url: url })
-        });
-        if(res.ok) { fb.style.color='var(--green)'; fb.textContent = 'URL RTSP atualizada!'; }
-        else { fb.style.color='var(--danger)'; fb.textContent = 'Erro de API ao gravar.'; }
-      } catch(e) {
-        fb.style.color='var(--danger)'; fb.textContent = 'Falha crítica de rede.';
-      }
-      setTimeout(()=>fb.textContent='', 4000);
-    };
-
-    window.testRtsp = (sensorId) => {
-      const url = document.getElementById(`rtsp-${sensorId}`).value.trim();
-      const fb = document.getElementById(`feedback-${sensorId}`);
-      const img = document.getElementById(`img-${sensorId}`);
-      if(!url) {
-        fb.style.color='var(--orange)'; fb.textContent = 'Insira um endereço RTSP na caixa primeiro!';
-        setTimeout(()=>fb.textContent='', 3000);
+    document.getElementById('save-contact').addEventListener('click', async () => {
+      const feedback = document.getElementById('contact-feedback');
+      const nameInput = document.getElementById('contact-name');
+      const phoneInput = document.getElementById('contact-phone');
+      const name = nameInput.value.trim();
+      const phone = phoneInput.value.trim();
+      if (!name) {
+        feedback.textContent = 'Informe o nome.';
+        feedback.style.color = 'var(--danger)';
         return;
       }
-      fb.style.color='var(--blue)'; fb.textContent = '⚙️ Conectando na câmera e extraindo frame (Aguarde alguns segundos)...';
-      img.style.display = 'none';
-      img.src = '';
-      
-      const testUrl = '/api/sensors/test_rtsp?rtsp_url=' + encodeURIComponent(url) + '&_t=' + Date.now();
-      
-      const newImg = new Image();
-      newImg.onload = () => {
-        fb.style.color='var(--green)'; fb.textContent = 'Câmera online! Imagem recebida em tempo real.';
-        img.src = testUrl;
-        img.style.display = 'block';
-      };
-      newImg.onerror = () => {
-        fb.style.color='var(--danger)'; fb.textContent = '❌ Falha ao conectar: URL incorreta, câmera off-line ou timeout.';
-      };
-      newImg.src = testUrl;
+      if (!phone) {
+        feedback.textContent = 'Informe o telefone.';
+        feedback.style.color = 'var(--danger)';
+        return;
+      }
+      try {
+        await apiPost('/api/contacts/create', { name, phone });
+        feedback.textContent = 'Contato salvo.';
+        feedback.style.color = 'var(--green)';
+        nameInput.value = '';
+        phoneInput.value = '';
+        await loadContacts();
+      } catch (error) {
+        feedback.textContent = 'Falha ao salvar contato.';
+        feedback.style.color = 'var(--danger)';
+      }
+    });
+
+    window.deleteContact = async (contactId) => {
+      const feedback = document.getElementById('contact-feedback');
+      try {
+        await apiPost('/api/contacts/delete', { contact_id: contactId });
+        feedback.textContent = 'Contato removido.';
+        feedback.style.color = 'var(--green)';
+        await loadContacts();
+      } catch (error) {
+        feedback.textContent = 'Falha ao remover contato.';
+        feedback.style.color = 'var(--danger)';
+      }
     };
   </script>
 </body>

@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <style>
     :root {
       --bg-dark: #0a0b10;
@@ -70,6 +71,11 @@
       flex-wrap: wrap;
     }
 
+    .topbar-actions .btn,
+    .topbar-actions .back-link {
+      white-space: nowrap;
+    }
+
     .back-link {
       color: var(--text);
       text-decoration: none;
@@ -126,6 +132,96 @@
       gap: 20px;
       align-items: flex-start;
       flex-wrap: wrap;
+    }
+
+    .header-side {
+      display: flex;
+      align-items: flex-start;
+      justify-content: flex-start;
+      gap: 18px;
+      flex-wrap: nowrap;
+      min-width: 0;
+      width: 100%;
+      margin-top: 8px;
+    }
+
+    .header-main {
+      flex: 1 1 340px;
+      min-width: 0;
+    }
+    .header-title-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .sensor-icon-shell {
+      width: 64px;
+      height: 64px;
+      border-radius: 16px;
+      display: grid;
+      place-items: center;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #cbd5e1;
+      flex: 0 0 auto;
+      overflow: hidden;
+    }
+    .sensor-icon-shell svg {
+      width: 28px;
+      height: 28px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .sensor-icon-shell i {
+      font-size: 28px;
+      line-height: 1;
+    }
+    .sensor-icon-shell img {
+      width: 34px;
+      height: 34px;
+      object-fit: contain;
+      display: block;
+    }
+    .sensor-title-block {
+      min-width: 0;
+      flex: 1 1 280px;
+    }
+
+    .snap-state {
+      min-width: 0;
+      max-width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-start;
+      text-align: left;
+      width: min(100%, 360px);
+    }
+
+    .snap-placeholder {
+      width: min(100%, 360px);
+      aspect-ratio: 16 / 10;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.03);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      font-size: 0.76rem;
+      line-height: 1.35;
+      padding: 10px;
+      text-align: center;
+    }
+    .snap-time {
+      font-size: 0.98rem;
+      color: #fff;
+      font-weight: 700;
+      line-height: 1.3;
     }
 
     .title-input {
@@ -280,8 +376,8 @@
 
     /* Snap Box and Video Modal */
     .snap-box {
-      width: 120px;
-      height: 80px;
+      width: min(100%, 360px);
+      aspect-ratio: 16 / 10;
       border-radius: 8px;
       overflow: hidden;
       border: 2px solid rgba(255,255,255,0.1);
@@ -444,6 +540,8 @@
 
     @media (max-width: 900px) {
       .header-row { flex-direction: column; }
+      .header-main { width: 100%; }
+      .header-side { width: 100%; justify-content: flex-start; }
     }
 
     /* Agendamento UI */
@@ -468,17 +566,50 @@
     @media (max-width: 600px) {
       body { padding: 16px 12px; }
       .topbar { align-items: stretch; flex-direction: column; }
-      .topbar-actions { justify-content: stretch; }
+      .topbar-actions { justify-content: stretch; flex-direction: column; width: 100%; }
       .topbar-actions .btn, .back-link { width: 100%; text-align: center; }
       .header-card { padding: 18px; border-radius: 18px; }
+      .header-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 18px;
+      }
       .meta-grid { grid-template-columns: 1fr; gap: 12px; }
       .title-input { font-size: 1.6rem; }
+      .subline { font-size: 0.92rem; }
+      .status-line { font-size: 0.74rem; gap: 8px; }
       .save-row { flex-direction: column; gap: 8px; width: 100%; }
       .save-row .btn { width: 100%; text-align: center; }
       .schedule-grid { grid-template-columns: 1fr; }
-      .modal-content { padding: 16px; width: 95%; border-radius: 16px; }
-      .days-row { justify-content: center; }
-      .header-row > div:first-child { width: 100%; }
+      .modal-content { padding: 16px; width: min(96vw, 96vw); border-radius: 16px; max-height: 88vh; }
+      .modal-header { align-items: flex-start; gap: 10px; }
+      .modal-header h2 { font-size: 1.15rem; line-height: 1.3; }
+      .days-row { justify-content: center; gap: 6px; }
+      .day-btn { width: 38px; height: 38px; font-size: 0.82rem; }
+      .header-main { width: 100%; }
+      .header-side {
+        width: 100%;
+        margin-left: 0;
+        display: block;
+      }
+      .snap-state {
+        min-width: 0;
+        max-width: none;
+        width: 100%;
+        flex: none;
+      }
+      .snap-box, .snap-placeholder {
+        width: 100%;
+        max-width: none;
+      }
+      .automation-actions { flex-direction: column; align-items: stretch; }
+      .automation-actions .btn { width: 100%; text-align: center; }
+      .automation-actions .subline { width: 100%; text-align: left; margin-bottom: 4px; }
+      .filter-row { gap: 8px; }
+      .filter-btn { flex: 1 1 calc(50% - 8px); min-width: 0; text-align: center; }
+      .chart { gap: 6px; min-height: 220px; padding-top: 16px; }
+      .panel { padding: 18px; }
+      .panel-title { font-size: 1.2rem; }
     }
     
     /* Config Modal */
@@ -498,6 +629,76 @@
     .modal-header h2 { margin: 0; font-size: 1.5rem; }
     .btn-close { background: transparent; border: none; color: var(--text-muted); font-size: 2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px;}
     .btn-close:hover { color: #fff; }
+
+    .config-section {
+      margin-top: 28px;
+      padding-top: 24px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
+    .section-title {
+      margin: 0 0 8px;
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+    .section-subline {
+      color: var(--text-muted);
+      font-size: 0.92rem;
+      margin-bottom: 18px;
+    }
+    .automation-card {
+      padding: 18px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      margin-bottom: 16px;
+    }
+    .automation-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .automation-card-title {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+    .automation-status-box {
+      margin-bottom: 16px;
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: var(--text-muted);
+      font-size: 0.92rem;
+    }
+    .automation-actions {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+    .bottom-actions {
+      display: grid;
+      gap: 12px;
+      margin-top: 20px;
+    }
+    .bottom-actions .btn {
+      width: 100%;
+      justify-content: center;
+      text-align: center;
+    }
+    .icon-preview-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
   </style>
 </head>
 <body>
@@ -505,17 +706,15 @@
     <div class="topbar">
       <a href="/" class="back-link">Voltar ao dashboard</a>
       <div class="topbar-actions">
-        <a id="btn-report" href="#" class="btn primary">Relatório Completo</a>
-        <button id="btn-open-config" class="btn" type="button">Configuração</button>
-        <button id="delete-sensor" class="btn danger" type="button">Remover sensor</button>
+        <a id="btn-report" href="#" class="btn primary">Relatorio Completo</a>
       </div>
     </div>
 
-    <!-- Modal de Configuração -->
+    <!-- Modal de Configuracao -->
     <div id="config-modal" class="modal-overlay">
       <div class="modal-content">
         <div class="modal-header">
-          <h2>Configuração do Sensor</h2>
+          <h2>Configuracao do Sensor</h2>
           <button id="btn-close-config" class="btn-close">&times;</button>
         </div>
         <div class="form-group" style="margin-bottom:24px;">
@@ -523,41 +722,82 @@
           <input id="sensor-name-input" class="form-control" type="text" value="" />
         </div>
         <div class="form-group" style="margin-bottom:24px;">
-          <label>Opções de Exibição</label>
+          <label>URL da camera (RTSP)</label>
+          <input id="sensor-rtsp-input" class="form-control" type="text" value="" placeholder="rtsp://usuario:senha@ip:porta/stream" />
+        </div>
+        <div class="schedule-grid" style="margin-top:0; margin-bottom:24px;">
+          <div class="form-group">
+            <label>Tipo de icone</label>
+            <select id="sensor-icon-mode" class="form-control" type="text">
+              <option value="builtin">Interno</option>
+              <option value="fa">Font Awesome</option>
+              <option value="upload">Upload proprio</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Icone interno</label>
+            <select id="sensor-builtin-icon" class="form-control" type="text">
+              <option value="motion">motion</option>
+              <option value="entry">entry</option>
+              <option value="sofa">sofa</option>
+              <option value="hall">hall</option>
+              <option value="garage">garage</option>
+              <option value="garden">garden</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Nome do icone FA</label>
+            <input id="sensor-fa-icon-input" class="form-control" type="text" value="" placeholder="fa-solid fa-dog" />
+          </div>
+          <div class="form-group">
+            <label>Arquivo de icone</label>
+            <input id="sensor-icon-file" class="form-control" type="file" accept=".png,.jpg,.jpeg,.webp,.gif,.svg" />
+          </div>
+        </div>
+        <div class="icon-preview-row">
+          <div id="sensor-icon-preview" class="sensor-icon-shell"></div>
+          <span id="sensor-icon-feedback" class="subline" style="margin:0;"></span>
+        </div>
+        <div style="display:flex; justify-content:flex-end; align-items:center; gap: 12px; margin-top:-8px; margin-bottom:24px; flex-wrap:wrap;">
+          <span id="test-rtsp-feedback" class="subline" style="margin:0;"></span>
+          <button id="test-rtsp" class="btn" type="button">Testar Camera</button>
+        </div>
+        <div class="form-group" style="margin-bottom:24px;">
+          <label>Opcoes de Exibicao</label>
           <div style="display:flex; align-items:center; gap:12px; margin-top:8px;">
             <label class="switch" style="width: 40px; height: 22px;">
               <input id="sensor-show-dashboard" type="checkbox" />
               <span class="slider"></span>
             </label>
-            <span style="color:#fff; font-size:0.95rem;">Mostrar no Início (Dashboard)</span>
+            <span style="color:#fff; font-size:0.95rem;">Mostrar no Inicio (Dashboard)</span>
           </div>
         </div>
         <div style="display:flex; justify-content:flex-end; align-items:center; gap: 12px; margin-bottom:24px;">
           <span id="save-name-feedback" class="subline" style="margin:0;"></span>
-          <button id="save-name" class="btn primary" type="button">Salvar Configurações Gerais</button>
+          <button id="save-name" class="btn primary" type="button">Salvar Configuracoes Gerais</button>
         </div>
         <div class="schedule-grid">
           <div class="form-group">
             <label>Modo de Funcionamento</label>
             <select id="sch-mode" class="form-control sch-input">
               <option value="always">Sempre Ativo (24/7)</option>
-              <option value="custom">Programação Customizada</option>
+              <option value="custom">Programacao Customizada</option>
             </select>
           </div>
           <div class="form-group">
-            <label>Dias Especiais de Plantão</label>
+            <label>Dias Especiais de Plantao</label>
             <select id="sch-alt" class="form-control sch-input">
-              <option value="none">Trabalhar todos os dias do calendário</option>
-              <option value="even">Somente Calendário Par (2, 4, 6...)</option>
-              <option value="odd">Somente Calendário Ímpar (1, 3, 5...)</option>
+              <option value="none">Trabalhar todos os dias do calendario</option>
+              <option value="even">Somente Calendario Par (2, 4, 6...)</option>
+              <option value="odd">Somente Calendario Impar (1, 3, 5...)</option>
             </select>
           </div>
           <div class="form-group">
-            <label>Horário Inicial da Vigilância</label>
+            <label>Horario Inicial da Vigilancia</label>
             <input type="time" id="sch-start" class="form-control sch-input" value="00:00" />
           </div>
           <div class="form-group">
-            <label>Horário Final do Bloqueio</label>
+            <label>Horario Final do Bloqueio</label>
             <input type="time" id="sch-end" class="form-control sch-input" value="23:59" />
           </div>
         </div>
@@ -570,34 +810,109 @@
             <button class="day-btn sch-input" data-day="3" type="button">Qua</button>
             <button class="day-btn sch-input" data-day="4" type="button">Qui</button>
             <button class="day-btn sch-input" data-day="5" type="button">Sex</button>
-            <button class="day-btn sch-input" data-day="6" type="button">Sáb</button>
+            <button class="day-btn sch-input" data-day="6" type="button">Sab</button>
           </div>
         </div>
         <div style="display:flex; justify-content:flex-end; align-items:center; gap: 12px; margin-top:16px;">
           <span id="save-sch-feedback" class="subline" style="margin:0;"></span>
           <button id="save-schedule" class="btn primary" type="button">Salvar Regras</button>
         </div>
+
+        <div class="config-section">
+          <h3 class="section-title">Automacao Externa</h3>
+          <div class="section-subline">Configure um unico gatilho por sensor para chamar um dispositivo externo.</div>
+
+          <div id="automation-status-box" class="automation-status-box">Carregando configuracao externa...</div>
+
+          <div class="automation-card">
+            <div class="automation-card-header">
+              <h4 class="automation-card-title">Regra de automacao</h4>
+              <label class="switch" style="width: 40px; height: 22px;">
+                <input id="auto-enabled" class="automation-input" type="checkbox" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="schedule-grid">
+              <div class="form-group">
+                <label>Gatilho</label>
+                <select id="auto-trigger" class="form-control automation-input">
+                  <option value="motion">Ao detectar movimento</option>
+                  <option value="idle">Sem movimento por X minutos</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Minutos sem movimento</label>
+                <input id="auto-idle-minutes" class="form-control automation-input" type="number" min="1" step="1" value="10" />
+              </div>
+              <div class="form-group">
+                <label>Dispositivo externo</label>
+                <select id="auto-device" class="form-control automation-input"></select>
+              </div>
+              <div class="form-group">
+                <label>Acao</label>
+                <select id="auto-action" class="form-control automation-input"></select>
+              </div>
+              <div class="form-group">
+                <label>Estado</label>
+                <select id="auto-state" class="form-control automation-input"></select>
+              </div>
+              <div class="form-group">
+                <label>Modo de disparo</label>
+                <select id="auto-repeat-mode" class="form-control automation-input">
+                  <option value="once">Disparar uma vez</option>
+                  <option value="repeat">Repetir enquanto ativo</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Repetir a cada X segundos</label>
+                <input id="auto-repeat-seconds" class="form-control automation-input" type="number" min="1" step="1" value="30" />
+              </div>
+              <div class="form-group">
+                <label>Notificar contatos</label>
+                <div style="display:flex; align-items:center; gap:12px; margin-top:8px;">
+                  <label class="switch" style="width: 40px; height: 22px;">
+                    <input id="auto-notify-enabled" class="automation-input" type="checkbox" />
+                    <span class="slider"></span>
+                  </label>
+                  <span style="color:#fff; font-size:0.95rem;">Ativar notificacao</span>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Contatos</label>
+                <select id="auto-notify-contacts" class="form-control automation-input" multiple size="5"></select>
+              </div>
+              <div class="form-group" style="grid-column: 1 / -1;">
+                <label>Mensagem de alerta</label>
+                <textarea id="auto-notify-message" class="form-control automation-input" rows="3" placeholder="Ex.: Movimento detectado no sensor da entrada."></textarea>
+              </div>
+            </div>
+            <div class="automation-actions">
+              <span id="save-automation-feedback" class="subline" style="margin:0;"></span>
+              <button id="refresh-external-devices" class="btn" type="button">Atualizar Dispositivos</button>
+              <button id="auto-test" class="btn" type="button">Testar Gatilho</button>
+              <button id="save-automation" class="btn primary" type="button">Salvar Automacao</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
     <section class="header-card glass-panel" id="header-card">
       <div class="header-row">
-        <div>
-          <div id="sensor-name" class="title-input"></div>
-          <div id="subline" class="subline">Carregando sensor...</div>
-          <div id="status-line" class="status-line tone-inactive">
-            <span class="dot tone-inactive"></span>
-            <span>CARREGANDO</span>
+        <div class="header-main">
+          <div class="header-title-row">
+            <div id="sensor-header-icon" class="sensor-icon-shell"></div>
+            <div class="sensor-title-block">
+              <div id="sensor-name" class="title-input"></div>
+              <div id="status-line" class="status-line tone-inactive">
+                <span class="dot tone-inactive"></span>
+                <span>CARREGANDO</span>
+              </div>
+            </div>
           </div>
         </div>
-        <div style="display:flex; gap: 24px; align-items:flex-start;">
-          <div id="last-snap-container"></div>
-          <div>
-            <label class="switch">
-              <input id="enabled-toggle" type="checkbox" />
-              <span class="slider"></span>
-            </label>
-          </div>
+        <div class="header-side">
+          <div id="last-snap-container" class="snap-state"></div>
         </div>
       </div>
     </section>
@@ -607,9 +922,9 @@
     <section class="layout">
       <article class="panel glass-panel">
         <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px;">
-          <h2 class="panel-title" style="margin: 0;">Gráfico de atividade</h2>
+          <h2 class="panel-title" style="margin: 0;">Grafico de atividade</h2>
           <div style="color: var(--text-muted); font-size: 0.9rem; font-weight: 600;">
-            Ocorrências: <span id="range-count" style="color: #fff;">--</span>
+            Ocorrencias: <span id="range-count" style="color: #fff;">--</span>
           </div>
         </div>
         <div class="filter-row">
@@ -619,6 +934,14 @@
           <button class="filter-btn active" data-range="24h" type="button">24h</button>
         </div>
         <div id="chart" class="chart"></div>
+      </article>
+    </section>
+    <section class="layout" style="margin-top: 20px;">
+      <article class="panel glass-panel">
+        <div class="bottom-actions">
+          <button id="btn-open-config" class="btn" type="button">Configuracao</button>
+          <button id="delete-sensor" class="btn danger" type="button">Remover sensor</button>
+        </div>
       </article>
     </section>
   </div>
@@ -633,12 +956,96 @@
   <script>
     const params = new URLSearchParams(window.location.search);
     const sensorId = params.get('sensor_id');
-    let currentRange = '24h';
+    let currentRange = '1h';
     let currentDetail = null;
+    let externalDevices = [];
+    let externalDevicesError = '';
+    let externalDevicesConfigured = false;
+    let availableContacts = [];
+    const iconMap = {
+      entry: '<svg viewBox="0 0 24 24"><path d="M5 21V8l7-5 7 5v13"></path><path d="M9 21v-6h6v6"></path></svg>',
+      sofa: '<svg viewBox="0 0 24 24"><path d="M5 11V9a3 3 0 0 1 3-3h8a3 3 0 0 1 3 3v2"></path><path d="M4 11h16a2 2 0 0 1 2 2v4H2v-4a2 2 0 0 1 2-2Z"></path><path d="M4 17v2"></path><path d="M20 17v2"></path></svg>',
+      hall: '<svg viewBox="0 0 24 24"><path d="M7 21V5l5-2 5 2v16"></path><path d="M10 21v-6h4v6"></path><path d="M9 9h.01"></path><path d="M15 9h.01"></path></svg>',
+      garage: '<svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7"></path><path d="M5 10v9h14v-9"></path><path d="M8 14h8"></path><path d="M8 17h8"></path></svg>',
+      garden: '<svg viewBox="0 0 24 24"><path d="M12 21V10"></path><path d="M7 14c0-4 5-8 5-8s5 4 5 8a5 5 0 0 1-10 0Z"></path><path d="M5 21h14"></path></svg>',
+      motion: '<svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 1 0 8 8"></path><path d="M17 7l4-4"></path><path d="M15 3h6v6"></path></svg>'
+    };
 
-    // Configurando link do botão de relatório
+    // Configurando link do botao de relatorio
     if (sensorId) {
       document.getElementById('btn-report').href = `/report?sensor_id=${encodeURIComponent(sensorId)}`;
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function renderSensorIconMarkup(sensor) {
+      const iconValue = sensor.icon || 'motion';
+      if (sensor.icon_kind === 'upload' && sensor.icon_url) {
+        return `<img src="${escapeHtml(sensor.icon_url)}" alt="">`;
+      }
+      if (sensor.icon_kind === 'fa' && iconValue.startsWith('fa:')) {
+        const faClass = iconValue.slice(3).trim();
+        const normalized = faClass.startsWith('fa-') ? `fa-solid ${faClass}` : faClass;
+        return `<i class="${escapeHtml(normalized)}" aria-hidden="true"></i>`;
+      }
+      return iconMap[iconValue] || iconMap.motion;
+    }
+
+    function updateIconModeVisibility() {
+      const mode = document.getElementById('sensor-icon-mode').value;
+      const builtin = document.getElementById('sensor-builtin-icon');
+      const faInput = document.getElementById('sensor-fa-icon-input');
+      const uploadInput = document.getElementById('sensor-icon-file');
+      builtin.disabled = mode !== 'builtin';
+      faInput.disabled = mode !== 'fa';
+      uploadInput.disabled = mode !== 'upload';
+      builtin.style.opacity = mode === 'builtin' ? '1' : '0.55';
+      faInput.style.opacity = mode === 'fa' ? '1' : '0.55';
+      uploadInput.style.opacity = mode === 'upload' ? '1' : '0.55';
+    }
+
+    function refreshIconPreview(sensorOverride) {
+      const preview = document.getElementById('sensor-icon-preview');
+      const mode = document.getElementById('sensor-icon-mode').value;
+      const builtin = document.getElementById('sensor-builtin-icon').value;
+      const faInput = document.getElementById('sensor-fa-icon-input').value.trim();
+      const fileInput = document.getElementById('sensor-icon-file');
+      if (mode === 'upload' && fileInput.files && fileInput.files[0]) {
+        const file = fileInput.files[0];
+        const reader = new FileReader();
+        reader.onload = () => {
+          preview.innerHTML = `<img src="${reader.result}" alt="">`;
+        };
+        reader.readAsDataURL(file);
+        return;
+      }
+      const fallbackSensor = sensorOverride || (currentDetail ? currentDetail.sensor : { icon: 'motion', icon_kind: 'builtin', icon_url: '' });
+      const previewSensor = mode === 'fa'
+        ? { icon: `fa:${faInput || 'fa-solid fa-circle'}`, icon_kind: 'fa', icon_url: '' }
+        : mode === 'upload'
+          ? fallbackSensor
+          : { icon: builtin || 'motion', icon_kind: 'builtin', icon_url: '' };
+      preview.innerHTML = renderSensorIconMarkup(previewSensor);
+    }
+
+    async function fileToBase64(file) {
+      return await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result || '');
+          const parts = result.split(',');
+          resolve(parts.length > 1 ? parts[1] : result);
+        };
+        reader.onerror = () => reject(new Error('file_read_failed'));
+        reader.readAsDataURL(file);
+      });
     }
 
     function renderChart(detail) {
@@ -662,12 +1069,143 @@
       document.getElementById('header-card').className = `header-card glass-panel tone-${detail.sensor.tone}`;
     }
 
+    function getDeviceOptionLabel(device) {
+      const parts = [device.name || device.device_id];
+      if (device.type) parts.push(device.type);
+      return parts.join(' - ');
+    }
+
+    function getDeviceById(deviceId) {
+      return externalDevices.find((device) => device.device_id === deviceId) || null;
+    }
+
+    function getSupportedActions(device) {
+      if (!device) return [];
+      if (Array.isArray(device.supported_actions) && device.supported_actions.length) {
+        return device.supported_actions;
+      }
+      if (device.type === 'motion') return ['motion'];
+      return ['power'];
+    }
+
+    function getSupportedStates(device, action) {
+      if (!device) return [];
+      const map = device.supported_states || {};
+      if (Array.isArray(map[action]) && map[action].length) {
+        return map[action];
+      }
+      if (action === 'motion') return ['DETECTED', 'NOT_DETECTED'];
+      return ['ON', 'OFF'];
+    }
+
+    function fillDeviceSelect(selectId, selectedValue) {
+      const select = document.getElementById(selectId);
+      const options = ['<option value="">Selecione um dispositivo</option>'];
+      externalDevices.forEach((device) => {
+        const selected = device.device_id === selectedValue ? 'selected' : '';
+        options.push(`<option value="${device.device_id}" ${selected}>${getDeviceOptionLabel(device)}</option>`);
+      });
+      select.innerHTML = options.join('');
+    }
+
+    function fillContactSelect(selectedIds) {
+      const select = document.getElementById('auto-notify-contacts');
+      const wanted = new Set((selectedIds || []).map((item) => Number(item)));
+      if (!availableContacts.length) {
+        select.innerHTML = '';
+        return;
+      }
+      select.innerHTML = availableContacts.map((contact) => {
+        const selected = wanted.has(Number(contact.id)) ? 'selected' : '';
+        return `<option value="${contact.id}" ${selected}>${escapeHtml(contact.name)} - ${escapeHtml(contact.phone)}</option>`;
+      }).join('');
+    }
+
+    function fillActionSelect(selectId, device, selectedValue) {
+      const select = document.getElementById(selectId);
+      const actions = getSupportedActions(device);
+      if (!actions.length) {
+        select.innerHTML = '<option value="power">power</option>';
+        return 'power';
+      }
+      const fallback = actions.includes(selectedValue) ? selectedValue : actions[0];
+      select.innerHTML = actions.map((action) => `<option value="${action}" ${action === fallback ? 'selected' : ''}>${action}</option>`).join('');
+      return fallback;
+    }
+
+    function fillStateSelect(selectId, device, action, selectedValue) {
+      const select = document.getElementById(selectId);
+      const states = getSupportedStates(device, action);
+      const fallback = states.includes(selectedValue) ? selectedValue : (states[0] || '');
+      select.innerHTML = states.map((state) => `<option value="${state}" ${state === fallback ? 'selected' : ''}>${state}</option>`).join('');
+      return fallback;
+    }
+
+    function refreshAutomationConfig(selectedDeviceId, selectedAction, selectedState) {
+      fillDeviceSelect('auto-device', selectedDeviceId);
+      const device = getDeviceById(document.getElementById('auto-device').value);
+      const action = fillActionSelect('auto-action', device, selectedAction);
+      fillStateSelect('auto-state', device, action, selectedState);
+    }
+
+    function updateAutomationFieldVisibility() {
+      const trigger = document.getElementById('auto-trigger').value;
+      const repeatMode = document.getElementById('auto-repeat-mode').value;
+      const idleInput = document.getElementById('auto-idle-minutes');
+      const repeatInput = document.getElementById('auto-repeat-seconds');
+      if (idleInput) {
+        idleInput.disabled = trigger !== 'idle';
+        idleInput.style.opacity = trigger === 'idle' ? '1' : '0.55';
+      }
+      if (repeatInput) {
+        repeatInput.disabled = repeatMode !== 'repeat';
+        repeatInput.style.opacity = repeatMode === 'repeat' ? '1' : '0.55';
+      }
+    }
+
+    function renderAutomationStatus(detail) {
+      const box = document.getElementById('automation-status-box');
+      if (!externalDevicesConfigured) {
+        box.textContent = 'API externa n?o configurada no backend. Defina EXTERNAL_API_BASE_URL e EXTERNAL_API_TOKEN no .env.';
+        return;
+      }
+      if (externalDevicesError) {
+        box.textContent = `Falha ao carregar dispositivos externos: ${externalDevicesError}`;
+        return;
+      }
+
+      const lastRun = detail.sensor.automation_last_run_at || 'nunca';
+      const lastEvent = detail.sensor.automation_last_event || 'nenhum';
+      const lastStatus = detail.sensor.automation_last_status || 'sem execucao';
+      const lastResponse = detail.sensor.automation_last_response || 'Sem retorno registrado.';
+      box.textContent = `Ultima automacao: evento ${lastEvent}, status ${lastStatus}, em ${lastRun}. Retorno: ${lastResponse}`;
+    }
+
+    function syncAutomationControls(detail) {
+      if (window.isAutomationEditing) return;
+      document.getElementById('auto-enabled').checked = !!detail.sensor.automation_enabled;
+      document.getElementById('auto-trigger').value = detail.sensor.automation_trigger || 'motion';
+      document.getElementById('auto-idle-minutes').value = detail.sensor.automation_idle_minutes || 10;
+      document.getElementById('auto-repeat-mode').value = detail.sensor.automation_repeat_mode || 'once';
+      document.getElementById('auto-repeat-seconds').value = detail.sensor.automation_repeat_seconds || 30;
+      document.getElementById('auto-notify-enabled').checked = !!detail.sensor.automation_notify_enabled;
+      document.getElementById('auto-notify-message').value = detail.sensor.automation_notify_message || '';
+      fillContactSelect(detail.sensor.automation_notify_contact_ids || []);
+      refreshAutomationConfig(
+        detail.sensor.automation_device_id || '',
+        detail.sensor.automation_action || 'power',
+        detail.sensor.automation_state || 'ON'
+      );
+      updateAutomationFieldVisibility();
+      renderAutomationStatus(detail);
+    }
+
     function renderDetail(detail) {
       currentDetail = detail;
       document.title = `${detail.sensor.name} | Sensor Detail`;
       document.getElementById('sensor-name').textContent = detail.sensor.name;
+      document.getElementById('sensor-header-icon').innerHTML = renderSensorIconMarkup(detail.sensor);
       
-      document.getElementById('subline').textContent = `Atividade em ${detail.analysis.range}`;
       document.getElementById('range-count').textContent = `${detail.analysis.total_movements}`;
       
       const snapContainer = document.getElementById('last-snap-container');
@@ -678,36 +1216,42 @@
           if (imgP.endsWith('.mp4')) {
               let thumbP = imgP.replace('.mp4', '.jpg');
               snapUI = `
-                 <div style="display:flex; flex-direction:column; gap:8px;">
-                   <div style="font-size:0.8rem; color:var(--text-muted); font-weight:600; text-transform:uppercase;">Última Detecção</div>
+                 <div style="display:flex; flex-direction:column; gap:10px; width:min(100%, 360px);">
+                   <div style="font-size:0.8rem; color:var(--text-muted); font-weight:600; text-transform:uppercase;">Ultima Deteccao</div>
                    <div class="snap-box" onclick="openModal('/snapshots/${imgP}')">
                      <img src="/snapshots/${thumbP}" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' viewBox=\\'0 0 100 100\\'%3E%3Crect width=\\'100\\' height=\\'100\\' fill=\\'%231a1a2e\\'/%3E%3C/svg%3E'" />
-                     <div class="play-overlay">▶</div>
+                     <div class="play-overlay">â–¶</div>
                    </div>
-                   <div style="font-size:0.85rem; color:#fff; font-weight:600;">${dtFmt}</div>
+                   <div class="snap-time">${dtFmt}</div>
                  </div>
               `;
           } else {
               snapUI = `
-                 <div style="display:flex; flex-direction:column; gap:8px;">
-                   <div style="font-size:0.8rem; color:var(--text-muted); font-weight:600; text-transform:uppercase;">Última Detecção</div>
+                 <div style="display:flex; flex-direction:column; gap:10px; width:min(100%, 360px);">
+                    <div style="font-size:0.8rem; color:var(--text-muted); font-weight:600; text-transform:uppercase;">Ultima Deteccao</div>
                    <div class="snap-box" onclick="openModal('/snapshots/${imgP}')">
                      <img src="/snapshots/${imgP}" />
                    </div>
-                   <div style="font-size:0.85rem; color:#fff; font-weight:600;">${dtFmt}</div>
+                   <div class="snap-time">${dtFmt}</div>
                  </div>
               `;
           }
           snapContainer.innerHTML = snapUI;
+      } else if (detail.sensor.tone === 'alert' || (detail.sensor.last_motion_ago_seconds !== null && detail.sensor.last_motion_ago_seconds <= 25)) {
+          const dtFmt = detail.sensor.last_motion_at_formatted || 'Deteccao recente';
+          snapContainer.innerHTML = `
+            <div style="font-size:0.8rem; color:var(--text-muted); font-weight:600; text-transform:uppercase;">Ultima deteccao</div>
+            <div class="snap-placeholder">Gravando clip da camera...</div>
+            <div class="snap-time">${dtFmt}</div>
+            <div style="font-size:0.78rem; color:var(--text-muted);">Aguarde alguns segundos</div>
+          `;
       } else {
-          snapContainer.innerHTML = '<div style="font-size:0.8rem; color:var(--text-muted);">Sem movimentos<br>registrados</div>';
+          snapContainer.innerHTML = `
+            <div style="font-size:0.8rem; color:var(--text-muted); font-weight:600; text-transform:uppercase;">Ultima deteccao</div>
+            <div class="snap-placeholder">Sem movimentos registrados</div>
+          `;
       }
       
-      const toggle = document.getElementById('enabled-toggle');
-      if (document.activeElement !== toggle) {
-        toggle.checked = detail.sensor.enabled;
-      }
-
       document.querySelectorAll('.filter-btn').forEach((button) => {
         button.classList.toggle('active', button.dataset.range === detail.analysis.range);
       });
@@ -724,21 +1268,86 @@
         if (document.activeElement !== nameInput) {
             nameInput.value = detail.sensor.name;
         }
+        const iconModeInput = document.getElementById('sensor-icon-mode');
+        if (document.activeElement !== iconModeInput) {
+            iconModeInput.value = detail.sensor.icon_kind || 'builtin';
+        }
+        const builtinIconInput = document.getElementById('sensor-builtin-icon');
+        if (document.activeElement !== builtinIconInput && (detail.sensor.icon_kind || 'builtin') === 'builtin') {
+            builtinIconInput.value = detail.sensor.icon || 'motion';
+        }
+        const faIconInput = document.getElementById('sensor-fa-icon-input');
+        if (document.activeElement !== faIconInput) {
+            faIconInput.value = (detail.sensor.icon_kind === 'fa' ? (detail.sensor.icon || '').replace(/^fa:/, '') : '');
+        }
+        document.getElementById('sensor-icon-feedback').textContent = detail.sensor.icon_kind === 'upload'
+          ? (detail.sensor.icon_url || '')
+          : (detail.sensor.icon || '');
+        updateIconModeVisibility();
+        refreshIconPreview(detail.sensor);
+
+        const rtspInput = document.getElementById('sensor-rtsp-input');
+        if (document.activeElement !== rtspInput) {
+            rtspInput.value = detail.sensor.rtsp_url || '';
+        }
 
         const showInput = document.getElementById('sensor-show-dashboard');
         if (document.activeElement !== showInput) {
             showInput.checked = detail.sensor.show_on_dashboard !== false;
         }
 
-        const enabledToggle = document.getElementById('enabled-toggle');
-        if (document.activeElement !== enabledToggle) {
-            enabledToggle.checked = detail.sensor.enabled;
+        const enabledConfig = document.getElementById('sensor-enabled-config');
+        if (enabledConfig && document.activeElement !== enabledConfig) {
+            enabledConfig.checked = detail.sensor.enabled;
         }
 
         const days = detail.sensor.schedule_days.split(',');
         document.querySelectorAll('.day-btn').forEach(btn => {
            btn.classList.toggle('active', days.includes(btn.dataset.day));
         });
+      }
+
+      syncAutomationControls(detail);
+    }
+
+    async function loadExternalDevices(force = false) {
+      try {
+        const url = force ? '/api/external/devices?refresh=1' : '/api/external/devices';
+        const response = await fetch(url);
+        const data = await response.json();
+        if (!response.ok || data.ok === false) {
+          externalDevices = [];
+          externalDevicesConfigured = !!data.configured;
+          externalDevicesError = data.error || 'request_failed';
+        } else {
+          externalDevices = data.devices || [];
+          externalDevicesConfigured = !!data.configured;
+          externalDevicesError = '';
+        }
+      } catch (error) {
+        externalDevices = [];
+        externalDevicesError = 'network_error';
+      }
+
+      if (currentDetail) {
+        syncAutomationControls(currentDetail);
+      }
+    }
+
+    async function loadContacts() {
+      try {
+        const response = await fetch('/api/contacts');
+        const data = await response.json();
+        if (!response.ok || data.ok === false) {
+          availableContacts = [];
+          return;
+        }
+        availableContacts = data.contacts || [];
+        if (currentDetail) {
+          fillContactSelect(currentDetail.sensor.automation_notify_contact_ids || []);
+        }
+      } catch (_error) {
+        availableContacts = [];
       }
     }
 
@@ -774,14 +1383,8 @@
       button.addEventListener('click', () => loadDetail(button.dataset.range));
     });
 
-    document.getElementById('enabled-toggle').addEventListener('change', async (event) => {
-      try {
-        await apiPost('/api/sensors/toggle', { sensor_id: sensorId, enabled: event.target.checked });
-        await loadDetail(currentRange);
-      } catch (error) {
-        event.target.checked = !event.target.checked;
-      }
-    });
+
+
 
     function openModal(url) {
       const modal = document.getElementById('video-modal');
@@ -805,16 +1408,46 @@
     document.getElementById('save-name').addEventListener('click', async () => {
       const feedback = document.getElementById('save-name-feedback');
       const name = document.getElementById('sensor-name-input').value.trim();
+      const rtspUrl = document.getElementById('sensor-rtsp-input').value.trim();
       const show_on_dashboard = document.getElementById('sensor-show-dashboard').checked;
+      const iconMode = document.getElementById('sensor-icon-mode').value;
+      const builtinIcon = document.getElementById('sensor-builtin-icon').value;
+      const faIcon = document.getElementById('sensor-fa-icon-input').value.trim();
+      const iconFileInput = document.getElementById('sensor-icon-file');
+      const enabledConfig = document.getElementById('sensor-enabled-config');
+      const enabled = enabledConfig ? enabledConfig.checked : !!(currentDetail && currentDetail.sensor && currentDetail.sensor.enabled);
       if (!name) {
         feedback.textContent = 'Informe um nome.';
         return;
       }
       try {
         await apiPost('/api/sensors/rename', { sensor_id: sensorId, name });
+        if (iconMode === 'upload' && iconFileInput.files && iconFileInput.files[0]) {
+          const file = iconFileInput.files[0];
+          const fileBase64 = await fileToBase64(file);
+          await apiPost('/api/sensors/icon', {
+            sensor_id: sensorId,
+            icon_mode: 'upload',
+            file_name: file.name,
+            file_base64: fileBase64
+          });
+        } else if (iconMode === 'upload') {
+          if (!(currentDetail && currentDetail.sensor && currentDetail.sensor.icon_kind === 'upload')) {
+            throw new Error('icon_upload_required');
+          }
+        } else if (iconMode === 'fa') {
+          await apiPost('/api/sensors/icon', { sensor_id: sensorId, icon_mode: 'fa', fa_icon: faIcon });
+        } else {
+          await apiPost('/api/sensors/icon', { sensor_id: sensorId, icon_mode: 'builtin', builtin_icon: builtinIcon });
+        }
+        await apiPost('/api/sensors/rtsp', { sensor_id: sensorId, rtsp_url: rtspUrl });
+        await apiPost('/api/sensors/toggle', { sensor_id: sensorId, enabled });
         await apiPost('/api/sensors/config_dashboard', { sensor_id: sensorId, show_on_dashboard });
-        feedback.textContent = 'Configuração salva!';
+        feedback.textContent = 'Configuracao salva!';
         feedback.style.color = 'var(--green)';
+        if (iconFileInput) {
+          iconFileInput.value = '';
+        }
         await loadDetail(currentRange);
       } catch (error) {
         feedback.textContent = 'Falha ao salvar.';
@@ -823,9 +1456,49 @@
       setTimeout(() => feedback.textContent = '', 3000);
     });
 
+    document.getElementById('test-rtsp').addEventListener('click', async () => {
+      const feedback = document.getElementById('test-rtsp-feedback');
+      const rtspUrl = document.getElementById('sensor-rtsp-input').value.trim();
+      if (!rtspUrl) {
+        feedback.textContent = 'Informe a URL RTSP.';
+        feedback.style.color = 'var(--danger)';
+        setTimeout(() => feedback.textContent = '', 3000);
+        return;
+      }
+
+      feedback.textContent = 'Testando camera...';
+      feedback.style.color = 'var(--text-muted)';
+
+      try {
+        const response = await fetch(`/api/sensors/test_rtsp?rtsp_url=${encodeURIComponent(rtspUrl)}`);
+        if (!response.ok) {
+          let errorMessage = 'camera_unreachable';
+          try {
+            const data = await response.json();
+            errorMessage = data.error || errorMessage;
+          } catch (_error) {
+          }
+          throw new Error(errorMessage);
+        }
+        feedback.textContent = 'Camera conectada com sucesso.';
+        feedback.style.color = 'var(--green)';
+      } catch (error) {
+        feedback.textContent = 'Falha ao conectar na camera.';
+        feedback.style.color = 'var(--danger)';
+      }
+      setTimeout(() => feedback.textContent = '', 3000);
+    });
+
+    document.getElementById('sensor-icon-mode').addEventListener('change', () => {
+      updateIconModeVisibility();
+      refreshIconPreview();
+    });
+    document.getElementById('sensor-builtin-icon').addEventListener('change', () => refreshIconPreview());
+    document.getElementById('sensor-fa-icon-input').addEventListener('input', () => refreshIconPreview());
+    document.getElementById('sensor-icon-file').addEventListener('change', () => refreshIconPreview());
     document.getElementById('delete-sensor').addEventListener('click', async () => {
       const sensorName = document.getElementById('sensor-name-input').value.trim() || document.getElementById('sensor-name').textContent.trim() || sensorId;
-      const confirmed = confirm(`Remover o sensor "${sensorName}" e todo o historico de movimentos? Esta acao nao pode ser desfeita.`);
+      const confirmed = confirm(`Remover o sensor "${sensorName}" e todo o historico de movimentos? Esta acao n?o pode ser desfeita.`);
       if (!confirmed) return;
 
       try {
@@ -836,7 +1509,7 @@
       }
     });
 
-    // Controle de Edição do Agendamento
+    // Controle de Edicao do Agendamento
     window.isScheduleEditing = false;
     document.querySelectorAll('.sch-input').forEach(el => {
       el.addEventListener('focus', () => { window.isScheduleEditing = true; });
@@ -850,6 +1523,80 @@
         btn.classList.toggle('active');
       });
     });
+
+    document.querySelectorAll('.automation-input').forEach((el) => {
+      el.addEventListener('focus', () => { window.isAutomationEditing = true; });
+      el.addEventListener('change', () => { window.isAutomationEditing = true; });
+    });
+
+    document.getElementById('auto-device').addEventListener('change', () => {
+      refreshAutomationConfig(document.getElementById('auto-device').value, document.getElementById('auto-action').value, document.getElementById('auto-state').value);
+    });
+
+    document.getElementById('auto-action').addEventListener('change', () => {
+      const device = getDeviceById(document.getElementById('auto-device').value);
+      fillStateSelect('auto-state', device, document.getElementById('auto-action').value, document.getElementById('auto-state').value);
+    });
+
+    document.getElementById('auto-trigger').addEventListener('change', updateAutomationFieldVisibility);
+    document.getElementById('auto-repeat-mode').addEventListener('change', updateAutomationFieldVisibility);
+
+    async function saveAutomation(showSuccess = true) {
+      const feedback = document.getElementById('save-automation-feedback');
+      const payload = {
+        sensor_id: sensorId,
+        automation_enabled: document.getElementById('auto-enabled').checked,
+        automation_trigger: document.getElementById('auto-trigger').value,
+        automation_idle_minutes: Number(document.getElementById('auto-idle-minutes').value || 10),
+        automation_device_id: document.getElementById('auto-device').value,
+        automation_action: document.getElementById('auto-action').value,
+        automation_state: document.getElementById('auto-state').value,
+        automation_repeat_mode: document.getElementById('auto-repeat-mode').value,
+        automation_repeat_seconds: Number(document.getElementById('auto-repeat-seconds').value || 30),
+        automation_notify_enabled: document.getElementById('auto-notify-enabled').checked,
+        automation_notify_contact_ids: Array.from(document.getElementById('auto-notify-contacts').selectedOptions).map((option) => Number(option.value)),
+        automation_notify_message: document.getElementById('auto-notify-message').value.trim()
+      };
+
+      try {
+        await apiPost('/api/sensors/automation', payload);
+        window.isAutomationEditing = false;
+        if (showSuccess) {
+          feedback.textContent = 'Automacao salva.';
+          feedback.style.color = 'var(--green)';
+          setTimeout(() => feedback.textContent = '', 3000);
+        }
+        await loadDetail(currentRange);
+        return true;
+      } catch (error) {
+        feedback.textContent = 'Falha ao salvar automacao.';
+        feedback.style.color = 'var(--danger)';
+        setTimeout(() => feedback.textContent = '', 3000);
+        return false;
+      }
+    }
+
+    async function testAutomation() {
+      const saved = await saveAutomation(false);
+      if (!saved) return;
+
+      const feedback = document.getElementById('save-automation-feedback');
+      const eventName = document.getElementById('auto-trigger').value;
+      try {
+        await apiPost('/api/sensors/automation/test', { sensor_id: sensorId, event: eventName });
+        feedback.textContent = `Teste de ${eventName} executado.`;
+        feedback.style.color = 'var(--green)';
+        await loadDetail(currentRange);
+      } catch (error) {
+        feedback.textContent = `Falha no teste de ${eventName}.`;
+        feedback.style.color = 'var(--danger)';
+      }
+      setTimeout(() => feedback.textContent = '', 3000);
+    }
+
+    document.getElementById('save-automation').addEventListener('click', () => saveAutomation(true));
+    document.getElementById('auto-test').addEventListener('click', () => testAutomation());
+    document.getElementById('refresh-external-devices').addEventListener('click', () => loadExternalDevices(true));
 
     document.getElementById('save-schedule').addEventListener('click', async () => {
       const fb = document.getElementById('save-sch-feedback');
@@ -880,6 +1627,8 @@
 
     document.getElementById('btn-open-config').addEventListener('click', () => {
       document.getElementById('config-modal').classList.add('active');
+      loadExternalDevices(false);
+      loadContacts();
     });
 
     document.getElementById('btn-close-config').addEventListener('click', () => {
@@ -893,8 +1642,11 @@
     });
 
     loadDetail();
+    loadExternalDevices();
+    loadContacts();
     setInterval(() => loadDetail(currentRange), 10000);
   </script>
 </body>
 </html>
+
 
