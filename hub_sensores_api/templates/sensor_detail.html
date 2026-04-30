@@ -819,8 +819,8 @@
         </div>
 
         <div class="config-section">
-          <h3 class="section-title">Automacao Externa</h3>
-          <div class="section-subline">Configure um unico gatilho por sensor para chamar um dispositivo externo.</div>
+          <h3 class="section-title">Automacao</h3>
+          <div class="section-subline">Configure um gatilho por sensor para chamar um dispositivo externo ou acionar um GPIO local do ESP32.</div>
 
           <div id="automation-status-box" class="automation-status-box">Carregando configuracao externa...</div>
 
@@ -845,16 +845,47 @@
                 <input id="auto-idle-minutes" class="form-control automation-input" type="number" min="1" step="1" value="10" />
               </div>
               <div class="form-group">
+                <label>Destino</label>
+                <select id="auto-target" class="form-control automation-input">
+                  <option value="external_api">Dispositivo externo</option>
+                  <option value="local_gpio">GPIO local do ESP32</option>
+                </select>
+              </div>
+              <div class="form-group auto-external-group">
                 <label>Dispositivo externo</label>
                 <select id="auto-device" class="form-control automation-input"></select>
               </div>
-              <div class="form-group">
+              <div class="form-group auto-external-group">
                 <label>Acao</label>
                 <select id="auto-action" class="form-control automation-input"></select>
               </div>
-              <div class="form-group">
+              <div class="form-group auto-external-group">
                 <label>Estado</label>
                 <select id="auto-state" class="form-control automation-input"></select>
+              </div>
+              <div class="form-group auto-gpio-group">
+                <label>Pino local</label>
+                <select id="auto-gpio-pin" class="form-control automation-input">
+                  <option value="4">GPIO 4</option>
+                  <option value="5">GPIO 5</option>
+                  <option value="6">GPIO 6</option>
+                  <option value="7">GPIO 7</option>
+                </select>
+              </div>
+              <div class="form-group auto-gpio-group">
+                <label>Nivel ativo</label>
+                <select id="auto-gpio-level" class="form-control automation-input">
+                  <option value="HIGH">HIGH (VCC)</option>
+                  <option value="LOW">LOW (GND)</option>
+                </select>
+              </div>
+              <div class="form-group auto-gpio-group">
+                <label>Tempo ligado por disparo (ms)</label>
+                <input id="auto-gpio-duration-ms" class="form-control automation-input" type="number" min="50" step="50" value="1000" />
+              </div>
+              <div class="form-group auto-gpio-group">
+                <label>Quantidade por acao</label>
+                <input id="auto-gpio-repeat-count" class="form-control automation-input" type="number" min="1" max="20" step="1" value="1" />
               </div>
               <div class="form-group">
                 <label>Modo de disparo</label>
@@ -1150,6 +1181,7 @@
 
     function updateAutomationFieldVisibility() {
       const trigger = document.getElementById('auto-trigger').value;
+      const target = document.getElementById('auto-target').value;
       const repeatMode = document.getElementById('auto-repeat-mode').value;
       const idleInput = document.getElementById('auto-idle-minutes');
       const repeatInput = document.getElementById('auto-repeat-seconds');
@@ -1161,15 +1193,22 @@
         repeatInput.disabled = repeatMode !== 'repeat';
         repeatInput.style.opacity = repeatMode === 'repeat' ? '1' : '0.55';
       }
+      document.querySelectorAll('.auto-external-group').forEach((el) => {
+        el.style.display = target === 'external_api' ? '' : 'none';
+      });
+      document.querySelectorAll('.auto-gpio-group').forEach((el) => {
+        el.style.display = target === 'local_gpio' ? '' : 'none';
+      });
     }
 
     function renderAutomationStatus(detail) {
       const box = document.getElementById('automation-status-box');
-      if (!externalDevicesConfigured) {
+      const target = detail.sensor.automation_target || 'external_api';
+      if (target === 'external_api' && !externalDevicesConfigured) {
         box.textContent = 'API externa n?o configurada no backend. Defina EXTERNAL_API_BASE_URL e EXTERNAL_API_TOKEN no .env.';
         return;
       }
-      if (externalDevicesError) {
+      if (target === 'external_api' && externalDevicesError) {
         box.textContent = `Falha ao carregar dispositivos externos: ${externalDevicesError}`;
         return;
       }
@@ -1178,14 +1217,25 @@
       const lastEvent = detail.sensor.automation_last_event || 'nenhum';
       const lastStatus = detail.sensor.automation_last_status || 'sem execucao';
       const lastResponse = detail.sensor.automation_last_response || 'Sem retorno registrado.';
+      if (target === 'local_gpio') {
+        const deviceIp = detail.sensor.device_last_seen_ip || 'desconhecido';
+        const commandPort = detail.sensor.device_command_port || 8088;
+        box.textContent = `GPIO local do ESP32: pino ${detail.sensor.automation_gpio_pin || '-'}, nivel ${detail.sensor.automation_gpio_level || 'HIGH'}, duracao ${detail.sensor.automation_gpio_duration_ms || 1000} ms, repeticoes ${detail.sensor.automation_gpio_repeat_count || 1}. Hub em ${deviceIp}:${commandPort}. Ultima automacao: evento ${lastEvent}, status ${lastStatus}, em ${lastRun}. Retorno: ${lastResponse}`;
+        return;
+      }
       box.textContent = `Ultima automacao: evento ${lastEvent}, status ${lastStatus}, em ${lastRun}. Retorno: ${lastResponse}`;
     }
 
     function syncAutomationControls(detail) {
       if (window.isAutomationEditing) return;
       document.getElementById('auto-enabled').checked = !!detail.sensor.automation_enabled;
+      document.getElementById('auto-target').value = detail.sensor.automation_target || 'external_api';
       document.getElementById('auto-trigger').value = detail.sensor.automation_trigger || 'motion';
       document.getElementById('auto-idle-minutes').value = detail.sensor.automation_idle_minutes || 10;
+      document.getElementById('auto-gpio-pin').value = String(detail.sensor.automation_gpio_pin || 4);
+      document.getElementById('auto-gpio-level').value = detail.sensor.automation_gpio_level || 'HIGH';
+      document.getElementById('auto-gpio-duration-ms').value = detail.sensor.automation_gpio_duration_ms || 1000;
+      document.getElementById('auto-gpio-repeat-count').value = detail.sensor.automation_gpio_repeat_count || 1;
       document.getElementById('auto-repeat-mode').value = detail.sensor.automation_repeat_mode || 'once';
       document.getElementById('auto-repeat-seconds').value = detail.sensor.automation_repeat_seconds || 30;
       document.getElementById('auto-notify-enabled').checked = !!detail.sensor.automation_notify_enabled;
@@ -1529,6 +1579,7 @@
       el.addEventListener('change', () => { window.isAutomationEditing = true; });
     });
 
+    document.getElementById('auto-target').addEventListener('change', updateAutomationFieldVisibility);
     document.getElementById('auto-device').addEventListener('change', () => {
       refreshAutomationConfig(document.getElementById('auto-device').value, document.getElementById('auto-action').value, document.getElementById('auto-state').value);
     });
@@ -1546,11 +1597,16 @@
       const payload = {
         sensor_id: sensorId,
         automation_enabled: document.getElementById('auto-enabled').checked,
+        automation_target: document.getElementById('auto-target').value,
         automation_trigger: document.getElementById('auto-trigger').value,
         automation_idle_minutes: Number(document.getElementById('auto-idle-minutes').value || 10),
         automation_device_id: document.getElementById('auto-device').value,
         automation_action: document.getElementById('auto-action').value,
         automation_state: document.getElementById('auto-state').value,
+        automation_gpio_pin: Number(document.getElementById('auto-gpio-pin').value || 4),
+        automation_gpio_level: document.getElementById('auto-gpio-level').value,
+        automation_gpio_duration_ms: Number(document.getElementById('auto-gpio-duration-ms').value || 1000),
+        automation_gpio_repeat_count: Number(document.getElementById('auto-gpio-repeat-count').value || 1),
         automation_repeat_mode: document.getElementById('auto-repeat-mode').value,
         automation_repeat_seconds: Number(document.getElementById('auto-repeat-seconds').value || 30),
         automation_notify_enabled: document.getElementById('auto-notify-enabled').checked,

@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WebServer.h>
 #include "esp_task_wdt.h"
 #include "config.local.h"
 
@@ -14,10 +15,14 @@ constexpr unsigned long SENSOR_POLL_MS = 25;
 constexpr unsigned long WIFI_MAX_OFFLINE_MS = 5UL * 60UL * 1000UL;
 constexpr unsigned long HEALTH_CHECK_MS = 60UL * 1000UL;
 constexpr unsigned long DEVICE_HEARTBEAT_MS = 3UL * 1000UL;
+constexpr unsigned long LOCAL_GPIO_GAP_MS = 250UL;
 constexpr uint8_t HEALTH_MAX_FALHAS = 5;
 constexpr uint32_t WATCHDOG_TIMEOUT_SECONDS = 20;
 constexpr uint8_t PINO_SEM_SECUNDARIO = 255;
+constexpr uint16_t DEVICE_COMMAND_PORT = 8088;
+constexpr uint8_t PINOS_GPIO_LOCAL[] = {4, 5, 6, 7};
 
+WebServer deviceServer(DEVICE_COMMAND_PORT);
 
 enum TipoLigacao {
   // Sensor fecha contato entre GPIO e 3V3; usa INPUT_PULLDOWN e ativo = HIGH.
@@ -48,6 +53,15 @@ unsigned long ultimoHeartbeatMs = 0;
 uint8_t falhasHealth = 0;
 bool sensoresRegistrados = false;
 bool watchdogAtivo = false;
+
+bool pinoGpioLocalPermitido(int pin) {
+  for (uint8_t permitido : PINOS_GPIO_LOCAL) {
+    if (pin == permitido) {
+      return true;
+    }
+  }
+  return false;
+}
 
 void alimentarWatchdog() {
   if (watchdogAtivo) {
@@ -125,6 +139,139 @@ void piscarStatusPorDuracao(uint8_t red, uint8_t green, uint8_t blue, unsigned l
 
 String montarSensorId(const SensorConfig& sensor) {
   return String(DEVICE_ID) + ":" + String(sensor.id);
+}
+
+String extrairCampoJsonString(const String& payload, const char* chave) {
+  String marcador = "\"" + String(chave) + "\"";
+  int inicioChave = payload.indexOf(marcador);
+  if (inicioChave < 0) {
+    return "";
+  }
+
+  int inicioValor = payload.indexOf(':', inicioChave);
+  if (inicioValor < 0) {
+    return "";
+  }
+  inicioValor = payload.indexOf('"', inicioValor);
+  if (inicioValor < 0) {
+    return "";
+  }
+  int fimValor = payload.indexOf('"', inicioValor + 1);
+  if (fimValor < 0) {
+    return "";
+  }
+  return payload.substring(inicioValor + 1, fimValor);
+}
+
+int extrairCampoJsonInt(const String& payload, const char* chave, int valorPadrao) {
+  String marcador = "\"" + String(chave) + "\"";
+  int inicioChave = payload.indexOf(marcador);
+  if (inicioChave < 0) {
+    return valorPadrao;
+  }
+
+  int inicioValor = payload.indexOf(':', inicioChave);
+  if (inicioValor < 0) {
+    return valorPadrao;
+  }
+
+  inicioValor++;
+  while (inicioValor < payload.length() && (payload[inicioValor] == ' ' || payload[inicioValor] == '\t')) {
+    inicioValor++;
+  }
+
+  int fimValor = inicioValor;
+  while (fimValor < payload.length() && isDigit(payload[fimValor])) {
+    fimValor++;
+  }
+
+  if (fimValor == inicioValor) {
+    return valorPadrao;
+  }
+  return payload.substring(inicioValor, fimValor).toInt();
+}
+
+void responderJsonLocal(int httpCode, const String& corpo) {
+  deviceServer.send(httpCode, "application/json", corpo);
+}
+
+void configurarGpioLocalInativo(uint8_t pin, bool ativoEmHigh) {
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, ativoEmHigh ? LOW : HIGH);
+}
+
+void acionarGpioLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs, uint8_t repeticoes) {
+  uint8_t nivelAtivo = ativoEmHigh ? HIGH : LOW;
+  uint8_t nivelInativo = ativoEmHigh ? LOW : HIGH;
+
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, nivelInativo);
+
+  for (uint8_t i = 0; i < repeticoes; i++) {
+    digitalWrite(pin, nivelAtivo);
+    delayComWatchdog(duracaoMs);
+    digitalWrite(pin, nivelInativo);
+
+    if (i + 1 < repeticoes) {
+      delayComWatchdog(LOCAL_GPIO_GAP_MS);
+    }
+  }
+}
+
+void processarPulsoGpioLocal() {
+  if (deviceServer.method() != HTTP_POST) {
+    responderJsonLocal(405, "{\"ok\":false,\"error\":\"method_not_allowed\"}");
+    return;
+  }
+
+  String payload = deviceServer.arg("plain");
+  int pin = extrairCampoJsonInt(payload, "pin", -1);
+  int durationMs = extrairCampoJsonInt(payload, "duration_ms", 1000);
+  int repeatCount = extrairCampoJsonInt(payload, "repeat_count", 1);
+  String activeLevel = extrairCampoJsonString(payload, "active_level");
+  activeLevel.toUpperCase();
+
+  if (!pinoGpioLocalPermitido(pin)) {
+    responderJsonLocal(400, "{\"ok\":false,\"error\":\"invalid_pin\"}");
+    return;
+  }
+
+  if (activeLevel != "HIGH" && activeLevel != "LOW") {
+    responderJsonLocal(400, "{\"ok\":false,\"error\":\"invalid_active_level\"}");
+    return;
+  }
+
+  if (durationMs < 50) durationMs = 50;
+  if (durationMs > 600000) durationMs = 600000;
+  if (repeatCount < 1) repeatCount = 1;
+  if (repeatCount > 20) repeatCount = 20;
+
+  bool ativoEmHigh = activeLevel == "HIGH";
+  Serial.print("GPIO local acionado no pino ");
+  Serial.print(pin);
+  Serial.print(" nivel=");
+  Serial.print(activeLevel);
+  Serial.print(" duracaoMs=");
+  Serial.print(durationMs);
+  Serial.print(" repeticoes=");
+  Serial.println(repeatCount);
+
+  acionarGpioLocal(static_cast<uint8_t>(pin), ativoEmHigh, static_cast<unsigned long>(durationMs), static_cast<uint8_t>(repeatCount));
+  responderJsonLocal(200, "{\"ok\":true}");
+}
+
+void setupServidorLocal() {
+  for (uint8_t pin : PINOS_GPIO_LOCAL) {
+    configurarGpioLocalInativo(pin, true);
+  }
+
+  deviceServer.on("/gpio/pulse", HTTP_POST, processarPulsoGpioLocal);
+  deviceServer.on("/health", HTTP_GET, []() {
+    responderJsonLocal(200, "{\"ok\":true,\"service\":\"esp32-local-gpio\"}");
+  });
+  deviceServer.begin();
+  Serial.print("Servidor local GPIO em porta ");
+  Serial.println(DEVICE_COMMAND_PORT);
 }
 
 bool pinoEstaAtivo(uint8_t pin, TipoLigacao ligacao) {
@@ -282,7 +429,7 @@ bool enviarHeartbeatDispositivo() {
     return false;
   }
 
-  String payload = "{\"device_id\":\"" + String(DEVICE_ID) + "\"}";
+  String payload = "{\"device_id\":\"" + String(DEVICE_ID) + "\",\"command_port\":" + String(DEVICE_COMMAND_PORT) + "}";
   int httpCode = 0;
   String resposta;
   if (!postJson(montarUrl(HEARTBEAT_ROUTE).c_str(), payload, httpCode, resposta)) {
@@ -325,6 +472,7 @@ void setup() {
   setLedColor(0, 0, 0);
 
   setupSensores();
+  setupServidorLocal();
   conectarWifi();
 
   Serial.println("Hub de sensores iniciado.");
@@ -332,6 +480,7 @@ void setup() {
 
 void loop() {
   alimentarWatchdog();
+  deviceServer.handleClient();
   unsigned long agora = millis();
 
   if (WiFi.status() != WL_CONNECTED) {

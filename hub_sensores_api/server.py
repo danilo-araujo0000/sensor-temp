@@ -103,6 +103,8 @@ MODERATOR_API_BASE_URL = env_value("MODERATOR_API_BASE_URL", "").rstrip("/")
 MODERATOR_API_USERNAME = env_value("MODERATOR_API_USERNAME", "")
 MODERATOR_API_PASSWORD = env_value("MODERATOR_API_PASSWORD", "")
 MODERATOR_API_TIMEOUT_SECONDS = max(env_int("MODERATOR_API_TIMEOUT_SECONDS", 15), 3)
+LOCAL_GPIO_ALLOWED_PINS = (4, 5, 6, 7)
+LOCAL_GPIO_PULSE_GAP_MS = 250
 
 
 def resolve_ffmpeg_bin() -> str:
@@ -185,8 +187,15 @@ def init_db() -> None:
         ensure_column(conn, "sensors", "automation_notify_enabled", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "sensors", "automation_notify_contact_ids", "TEXT")
         ensure_column(conn, "sensors", "automation_notify_message", "TEXT")
+        ensure_column(conn, "sensors", "automation_target", "TEXT DEFAULT 'external_api'")
+        ensure_column(conn, "sensors", "automation_gpio_pin", "INTEGER")
+        ensure_column(conn, "sensors", "automation_gpio_level", "TEXT DEFAULT 'HIGH'")
+        ensure_column(conn, "sensors", "automation_gpio_duration_ms", "INTEGER NOT NULL DEFAULT 1000")
+        ensure_column(conn, "sensors", "automation_gpio_repeat_count", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "sensors", "device_last_seen_at", "TEXT")
         ensure_column(conn, "sensors", "device_last_seen_epoch", "INTEGER")
+        ensure_column(conn, "sensors", "device_last_seen_ip", "TEXT")
+        ensure_column(conn, "sensors", "device_command_port", "INTEGER")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_sensors_device
@@ -343,7 +352,9 @@ def fetch_sensor(sensor_id: str) -> sqlite3.Row | None:
                    automation_trigger, automation_device_id, automation_action, automation_state,
                    automation_repeat_mode, automation_repeat_seconds, automation_last_trigger_epoch,
                    automation_last_condition_key, automation_notify_enabled, automation_notify_contact_ids,
-                   automation_notify_message, device_last_seen_at, device_last_seen_epoch
+                   automation_notify_message, automation_target, automation_gpio_pin,
+                   automation_gpio_level, automation_gpio_duration_ms, automation_gpio_repeat_count,
+                   device_last_seen_at, device_last_seen_epoch, device_last_seen_ip, device_command_port
             FROM sensors
             WHERE sensor_id = ?
             """,
@@ -401,6 +412,40 @@ def sanitize_repeat_mode(mode: object, default: str = "once") -> str:
     return normalized if normalized in {"once", "repeat"} else default
 
 
+def sanitize_automation_target(target: object, default: str = "external_api") -> str:
+    normalized = str(target or default).strip().lower()
+    return normalized if normalized in {"external_api", "local_gpio"} else default
+
+
+def sanitize_gpio_pin(pin: object) -> int | None:
+    try:
+        normalized = int(pin)
+    except (TypeError, ValueError):
+        return None
+    return normalized if normalized in LOCAL_GPIO_ALLOWED_PINS else None
+
+
+def sanitize_gpio_level(level: object, default: str = "HIGH") -> str:
+    normalized = str(level or default).strip().upper()
+    return normalized if normalized in {"HIGH", "LOW"} else default
+
+
+def sanitize_gpio_duration_ms(value: object, default: int = 1000) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(normalized, 50), 600000)
+
+
+def sanitize_gpio_repeat_count(value: object, default: int = 1) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(normalized, 1), 20)
+
+
 def external_api_ready() -> bool:
     return bool(EXTERNAL_API_BASE_URL and EXTERNAL_API_TOKEN)
 
@@ -414,7 +459,7 @@ def is_device_online(sensor: sqlite3.Row | dict, now_epoch: int | None = None) -
     return reference_epoch - int(last_seen_epoch) <= DEVICE_HEARTBEAT_TIMEOUT_SECONDS
 
 
-def mark_device_heartbeat(device_id: str) -> dict:
+def mark_device_heartbeat(device_id: str, remote_ip: str = "", command_port: int | None = None) -> dict:
     normalized = device_id.strip()
     if not normalized:
         raise ValueError("device_id_required")
@@ -429,10 +474,12 @@ def mark_device_heartbeat(device_id: str) -> dict:
             UPDATE sensors
             SET device_last_seen_at = ?,
                 device_last_seen_epoch = ?,
+                device_last_seen_ip = COALESCE(?, device_last_seen_ip),
+                device_command_port = COALESCE(?, device_command_port),
                 updated_at = updated_at
             WHERE device_id = ?
             """,
-            (now_iso, now_epoch, normalized),
+            (now_iso, now_epoch, remote_ip.strip() or None, command_port, normalized),
         )
         conn.commit()
 
@@ -441,6 +488,8 @@ def mark_device_heartbeat(device_id: str) -> dict:
         "updated_sensors": cursor.rowcount,
         "last_seen_at": now_iso,
         "last_seen_epoch": now_epoch,
+        "device_last_seen_ip": remote_ip.strip(),
+        "device_command_port": command_port,
     }
 
 
@@ -795,6 +844,64 @@ def trigger_external_device(sensor: sqlite3.Row | dict, event_name: str) -> dict
         "status": response["status"],
         "response": response["text"][:500],
     }
+
+
+def trigger_local_gpio(sensor: sqlite3.Row | dict, event_name: str) -> dict:
+    sensor_dict = dict(sensor)
+    pin = sanitize_gpio_pin(sensor_dict.get("automation_gpio_pin"))
+    if pin is None:
+        return {"ok": False, "reason": "local_gpio_not_configured"}
+
+    device_ip = str(sensor_dict.get("device_last_seen_ip") or "").strip()
+    if not device_ip:
+        return {"ok": False, "reason": "device_ip_unknown"}
+
+    raw_port = sensor_dict.get("device_command_port")
+    try:
+        device_port = int(raw_port)
+    except (TypeError, ValueError):
+        device_port = 8088
+    if device_port <= 0:
+        device_port = 8088
+
+    level = sanitize_gpio_level(sensor_dict.get("automation_gpio_level"), "HIGH")
+    duration_ms = sanitize_gpio_duration_ms(sensor_dict.get("automation_gpio_duration_ms"), 1000)
+    repeat_count = sanitize_gpio_repeat_count(sensor_dict.get("automation_gpio_repeat_count"), 1)
+    payload = {
+        "pin": pin,
+        "active_level": level,
+        "duration_ms": duration_ms,
+        "repeat_count": repeat_count,
+        "sensor_id": sensor_dict.get("sensor_id", ""),
+        "event": event_name,
+    }
+
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(
+        f"http://{device_ip}:{device_port}/gpio/pulse",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            text = response.read().decode("utf-8", errors="replace")
+            parsed = json.loads(text) if text.strip().startswith("{") else text
+            return {
+                "ok": True,
+                "target": "local_gpio",
+                "pin": pin,
+                "active_level": level,
+                "duration_ms": duration_ms,
+                "repeat_count": repeat_count,
+                "status": response.status,
+                "response": parsed,
+            }
+    except HTTPError as exc:
+        error_text = exc.read().decode("utf-8", errors="replace")
+        return {"ok": False, "reason": f"http_{exc.code}", "response": error_text[:300]}
+    except URLError as exc:
+        return {"ok": False, "reason": f"network_error:{exc.reason}"}
 
 def list_snapshot_media_files() -> list[Path]:
     if not SNAPSHOTS_DIR.exists():
@@ -1182,12 +1289,17 @@ def update_sensor_automation(payload: dict) -> dict | None:
         return None
 
     automation_enabled = coerce_bool(payload.get("automation_enabled", False))
+    automation_target = sanitize_automation_target(payload.get("automation_target"), "external_api")
     automation_trigger = sanitize_trigger(payload.get("automation_trigger"), "motion")
     automation_device_id = str(payload.get("automation_device_id", "")).strip()
     automation_action = sanitize_action(payload.get("automation_action"), "power")
     default_state = "ON" if automation_trigger == "motion" else "OFF"
     automation_state = sanitize_state_for_action(automation_action, payload.get("automation_state"), default_state)
     automation_repeat_mode = sanitize_repeat_mode(payload.get("automation_repeat_mode"), "once")
+    automation_gpio_pin = sanitize_gpio_pin(payload.get("automation_gpio_pin"))
+    automation_gpio_level = sanitize_gpio_level(payload.get("automation_gpio_level"), "HIGH")
+    automation_gpio_duration_ms = sanitize_gpio_duration_ms(payload.get("automation_gpio_duration_ms"), 1000)
+    automation_gpio_repeat_count = sanitize_gpio_repeat_count(payload.get("automation_gpio_repeat_count"), 1)
     automation_notify_enabled = coerce_bool(payload.get("automation_notify_enabled", False))
     raw_contact_ids = payload.get("automation_notify_contact_ids", [])
     if isinstance(raw_contact_ids, list):
@@ -1226,10 +1338,15 @@ def update_sensor_automation(payload: dict) -> dict | None:
                 automation_idle_state = ?,
                 automation_idle_triggered_epoch = NULL,
                 automation_enabled = ?,
+                automation_target = ?,
                 automation_trigger = ?,
                 automation_device_id = ?,
                 automation_action = ?,
                 automation_state = ?,
+                automation_gpio_pin = ?,
+                automation_gpio_level = ?,
+                automation_gpio_duration_ms = ?,
+                automation_gpio_repeat_count = ?,
                 automation_repeat_mode = ?,
                 automation_repeat_seconds = ?,
                 automation_notify_enabled = ?,
@@ -1251,10 +1368,15 @@ def update_sensor_automation(payload: dict) -> dict | None:
                 "power",
                 "OFF",
                 1 if automation_enabled else 0,
+                automation_target,
                 automation_trigger,
-                automation_device_id,
-                automation_action,
-                automation_state,
+                automation_device_id if automation_target == "external_api" else "",
+                automation_action if automation_target == "external_api" else "power",
+                automation_state if automation_target == "external_api" else "ON",
+                automation_gpio_pin,
+                automation_gpio_level,
+                automation_gpio_duration_ms,
+                automation_gpio_repeat_count,
                 automation_repeat_mode,
                 automation_repeat_seconds,
                 1 if automation_notify_enabled else 0,
@@ -1331,12 +1453,24 @@ def evaluate_and_run_sensor_automation(
     if not force and not should_run_automation(sensor, event_name, condition_key, now_epoch):
         return {"ok": False, "reason": "repeat_window_active"}
 
-    device_result = trigger_external_device(sensor, event_name)
+    automation_target = sanitize_automation_target(sensor_dict.get("automation_target"), "external_api")
+    if automation_target == "local_gpio":
+        device_result = trigger_local_gpio(sensor, event_name)
+    else:
+        device_result = trigger_external_device(sensor, event_name)
     notify_result = notify_contacts(sensor, event_name)
     actionable_results = [
         item
         for item in (device_result, notify_result)
-        if item.get("reason") not in {"device_not_configured", "external_api_not_configured", "notification_disabled", "notification_contacts_not_configured", "moderator_api_not_configured"}
+        if item.get("reason") not in {
+            "device_not_configured",
+            "external_api_not_configured",
+            "local_gpio_not_configured",
+            "device_ip_unknown",
+            "notification_disabled",
+            "notification_contacts_not_configured",
+            "moderator_api_not_configured",
+        }
     ]
     success = bool(device_result.get("ok") or notify_result.get("ok"))
     result = {
@@ -1380,7 +1514,6 @@ def run_idle_automation_checks() -> None:
             FROM sensors
             WHERE enabled = 1
               AND automation_enabled = 1
-              AND COALESCE(TRIM(automation_device_id), '') != ''
             """
         ).fetchall()
 
@@ -1820,10 +1953,15 @@ def get_sensor_detail(sensor_id: str, range_key: str) -> dict | None:
             "automation_last_response": sensor_dict.get("automation_last_response", "") or "",
             "automation_last_run_at": sensor_dict.get("automation_last_run_at", "") or "",
             "automation_enabled": bool(sensor_dict.get("automation_enabled", 0)),
+            "automation_target": sanitize_automation_target(sensor_dict.get("automation_target"), "external_api"),
             "automation_trigger": sensor_dict.get("automation_trigger", "motion") or "motion",
             "automation_device_id": sensor_dict.get("automation_device_id", "") or "",
             "automation_action": sensor_dict.get("automation_action", "power") or "power",
             "automation_state": sensor_dict.get("automation_state", "ON") or "ON",
+            "automation_gpio_pin": sensor_dict.get("automation_gpio_pin"),
+            "automation_gpio_level": sanitize_gpio_level(sensor_dict.get("automation_gpio_level"), "HIGH"),
+            "automation_gpio_duration_ms": int(sensor_dict.get("automation_gpio_duration_ms", 1000) or 1000),
+            "automation_gpio_repeat_count": int(sensor_dict.get("automation_gpio_repeat_count", 1) or 1),
             "automation_repeat_mode": sensor_dict.get("automation_repeat_mode", "once") or "once",
             "automation_repeat_seconds": int(sensor_dict.get("automation_repeat_seconds", 30) or 30),
             "automation_notify_enabled": bool(sensor_dict.get("automation_notify_enabled", 0)),
@@ -1836,6 +1974,8 @@ def get_sensor_detail(sensor_id: str, range_key: str) -> dict | None:
             "device_online": sensor_dict["device_online"],
             "device_last_seen_at": sensor_dict.get("device_last_seen_at", "") or "",
             "device_last_seen_epoch": sensor_dict.get("device_last_seen_epoch"),
+            "device_last_seen_ip": sensor_dict.get("device_last_seen_ip", "") or "",
+            "device_command_port": sensor_dict.get("device_command_port"),
             "status_label": status_label,
             "tone": tone,
             "registered_at": sensor_dict["registered_at"],
@@ -2210,7 +2350,16 @@ class SensorHubHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/devices/heartbeat":
             try:
-                result = mark_device_heartbeat(str(payload.get("device_id", "")))
+                raw_command_port = payload.get("command_port")
+                try:
+                    command_port = int(raw_command_port)
+                except (TypeError, ValueError):
+                    command_port = None
+                result = mark_device_heartbeat(
+                    str(payload.get("device_id", "")),
+                    self.client_address[0] if self.client_address else "",
+                    command_port,
+                )
             except ValueError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
                 return
