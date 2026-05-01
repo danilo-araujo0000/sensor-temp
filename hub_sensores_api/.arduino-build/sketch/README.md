@@ -1,4 +1,4 @@
-#line 1 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\README.md"
+#line 1 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\README.md"
 # Hub de Sensores
 
 Projeto separado do firmware principal.
@@ -10,7 +10,7 @@ Projeto separado do firmware principal.
 - No boot, registra os sensores no backend.
 - Depois envia apenas o `sensor_id` quando detecta movimento.
 - O servidor Python resolve o resto e grava tudo em `SQLite`.
-- A API aplica o cooldown de 5 minutos por `sensor_id`.
+- A API aplica o cooldown de 20 segundos por `sensor_id`.
 
 ## Arquivos
 

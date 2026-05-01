@@ -63,6 +63,18 @@ bool pinoGpioLocalPermitido(int pin) {
   return false;
 }
 
+bool pinoEhSensorConfigurado(uint8_t pin) {
+  for (size_t i = 0; i < TOTAL_SENSORES; i++) {
+    if (sensores[i].pinPrincipal == pin) {
+      return true;
+    }
+    if (sensores[i].pinSecundario != PINO_SEM_SECUNDARIO && sensores[i].pinSecundario == pin) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void alimentarWatchdog() {
   if (watchdogAtivo) {
     esp_task_wdt_reset();
@@ -201,6 +213,13 @@ void configurarGpioLocalInativo(uint8_t pin, bool ativoEmHigh) {
 }
 
 void acionarGpioLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs, uint8_t repeticoes) {
+  if (pinoEhSensorConfigurado(pin)) {
+    Serial.print("GPIO local recusado no pino ");
+    Serial.print(pin);
+    Serial.println(" porque ele esta configurado como sensor.");
+    return;
+  }
+
   uint8_t nivelAtivo = ativoEmHigh ? HIGH : LOW;
   uint8_t nivelInativo = ativoEmHigh ? LOW : HIGH;
 
@@ -236,6 +255,11 @@ void processarPulsoGpioLocal() {
     return;
   }
 
+  if (pinoEhSensorConfigurado(static_cast<uint8_t>(pin))) {
+    responderJsonLocal(409, "{\"ok\":false,\"error\":\"pin_in_use_by_sensor\"}");
+    return;
+  }
+
   if (activeLevel != "HIGH" && activeLevel != "LOW") {
     responderJsonLocal(400, "{\"ok\":false,\"error\":\"invalid_active_level\"}");
     return;
@@ -261,10 +285,6 @@ void processarPulsoGpioLocal() {
 }
 
 void setupServidorLocal() {
-  for (uint8_t pin : PINOS_GPIO_LOCAL) {
-    configurarGpioLocalInativo(pin, true);
-  }
-
   deviceServer.on("/gpio/pulse", HTTP_POST, processarPulsoGpioLocal);
   deviceServer.on("/health", HTTP_GET, []() {
     responderJsonLocal(200, "{\"ok\":true,\"service\":\"esp32-local-gpio\"}");

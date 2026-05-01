@@ -1,3 +1,3 @@
-C:\Users\danilo\Documents\build\sensor\ pre\sensor-temp\.arduino-build\core\esp32-hal-hosted.c.o: \
- C:\Users\danilo\AppData\Local\Arduino15\packages\esp32\hardware\esp32\3.3.8\cores\esp32\esp32-hal-hosted.c \
- C:\Users\danilo\AppData\Local\Arduino15\packages\esp32\tools\esp32s3-libs\3.3.8/qio_qspi/include/sdkconfig.h
+U:\build\sensor\sensor-temp\.arduino-build\core\esp32-hal-hosted.c.o: \
+ C:\Users\dbispo\AppData\Local\Arduino15\packages\esp32\hardware\esp32\3.3.7\cores\esp32\esp32-hal-hosted.c \
+ C:\Users\dbispo\AppData\Local\Arduino15\packages\esp32\tools\esp32s3-libs\3.3.7/qio_qspi/include/sdkconfig.h

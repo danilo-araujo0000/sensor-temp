@@ -1,4 +1,4 @@
-#line 1 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\resumo do projeto.md"
+#line 1 "U:\\build\\sensor\\sensor-temp\\resumo do projeto.md"
 🛡️ O Projeto: "Sentinel Core"
 O objetivo é criar um dispositivo de mesa ou parede que sirva como a "ponte" entre o mundo físico (temperatura e IR) e o seu ecossistema digital (Zabbix, n8n, API).
 

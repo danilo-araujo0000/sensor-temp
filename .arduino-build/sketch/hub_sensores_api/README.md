@@ -1,4 +1,4 @@
-#line 1 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\README.md"
+#line 1 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\README.md"
 # Hub de Sensores
 
 Projeto separado do firmware principal.

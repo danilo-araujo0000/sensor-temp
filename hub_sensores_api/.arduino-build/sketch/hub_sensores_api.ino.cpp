@@ -1,60 +1,172 @@
 #include <Arduino.h>
-#line 1 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 1 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WebServer.h>
+#include "esp_task_wdt.h"
+#include "config.local.h"
 
-constexpr char WIFI_SSID[] = "Tablet";
-constexpr char WIFI_PASSWORD[] = "TABLET@admin2024";
-constexpr char DEVICE_ID[] = "esp32s3-hub-01";
-constexpr char SENSOR_REGISTER_URL[] = "http://172.19.200.1:5080/sensors/register";
-constexpr char MOVEMENT_URL[] = "http://172.19.200.1:5080/movements";
+constexpr char SENSOR_REGISTER_ROUTE[] = "/sensors/register";
+constexpr char MOVEMENT_ROUTE[] = "/movements";
+constexpr char HEARTBEAT_ROUTE[] = "/devices/heartbeat";
+constexpr char HEALTH_ROUTE[] = "/health";
 
 constexpr unsigned long WIFI_RETRY_MS = 10000;
 constexpr unsigned long SENSOR_POLL_MS = 25;
+// Se a rede ou a API ficarem indisponiveis por muito tempo, o ESP reinicia para sair de estados ruins.
+constexpr unsigned long WIFI_MAX_OFFLINE_MS = 5UL * 60UL * 1000UL;
+constexpr unsigned long HEALTH_CHECK_MS = 60UL * 1000UL;
+constexpr unsigned long DEVICE_HEARTBEAT_MS = 3UL * 1000UL;
+constexpr unsigned long LOCAL_GPIO_GAP_MS = 250UL;
+constexpr uint8_t HEALTH_MAX_FALHAS = 5;
+constexpr uint32_t WATCHDOG_TIMEOUT_SECONDS = 20;
+constexpr uint8_t PINO_SEM_SECUNDARIO = 255;
+constexpr uint16_t DEVICE_COMMAND_PORT = 8088;
+constexpr uint8_t PINOS_GPIO_LOCAL[] = {4, 5, 6, 7};
+
+WebServer deviceServer(DEVICE_COMMAND_PORT);
+
+enum TipoLigacao {
+  // Sensor fecha contato entre GPIO e 3V3; usa INPUT_PULLDOWN e ativo = HIGH.
+  LigacaoGpio3V3,
+  // Sensor fecha contato entre GPIO e GND; usa INPUT_PULLUP e ativo = LOW.
+  LigacaoGpioGnd
+};
 
 struct SensorConfig {
   const char* id;
-  uint8_t pin;
-  bool activeHigh;
-  bool usePulldown;
+  uint8_t pinPrincipal;
+  uint8_t pinSecundario;
+  TipoLigacao ligacao;
+  bool enabled;
+  bool showOnDashboard;
   bool lastState;
 };
 
-SensorConfig sensores[] = {
-  { "mov_entrada", 8, true, true, false },
-  { "mov_sala", 17, true, true, false },
-  { "mov_corredor", 18, true, true, false }
-};
+#include "sensores_config.h"
 
 constexpr size_t TOTAL_SENSORES = sizeof(sensores) / sizeof(sensores[0]);
 
 unsigned long ultimoWifiRetryMs = 0;
 unsigned long ultimoPollMs = 0;
+unsigned long wifiDesconectadoDesdeMs = 0;
+unsigned long ultimoHealthCheckMs = 0;
+unsigned long ultimoHeartbeatMs = 0;
+uint8_t falhasHealth = 0;
 bool sensoresRegistrados = false;
+bool watchdogAtivo = false;
 
-#line 33 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 57 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool pinoGpioLocalPermitido(int pin);
+#line 66 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void alimentarWatchdog();
+#line 72 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void delayComWatchdog(unsigned long duracaoMs);
+#line 81 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void reiniciarDispositivo(const char* motivo);
+#line 89 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void setupWatchdog();
+#line 107 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void setLedColor(uint8_t red, uint8_t green, uint8_t blue);
-#line 41 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 115 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void piscarStatus(uint8_t red, uint8_t green, uint8_t blue, uint8_t repeticoes, unsigned long intervaloMs);
-#line 50 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 124 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void acenderStatus(uint8_t red, uint8_t green, uint8_t blue, unsigned long duracaoMs);
-#line 56 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 130 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void piscarStatusPorDuracao(uint8_t red, uint8_t green, uint8_t blue, unsigned long duracaoMs, unsigned long intervaloMs);
+#line 140 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 String montarSensorId(const SensorConfig& sensor);
-#line 60 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 144 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+String extrairCampoJsonString(const String& payload, const char* chave);
+#line 166 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+int extrairCampoJsonInt(const String& payload, const char* chave, int valorPadrao);
+#line 194 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void responderJsonLocal(int httpCode, const String& corpo);
+#line 198 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void configurarGpioLocalInativo(uint8_t pin, bool ativoEmHigh);
+#line 203 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void acionarGpioLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs, uint8_t repeticoes);
+#line 221 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void processarPulsoGpioLocal();
+#line 263 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void setupServidorLocal();
+#line 277 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool pinoEstaAtivo(uint8_t pin, TipoLigacao ligacao);
+#line 282 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool sensorEstaAtivo(const SensorConfig& sensor);
+#line 294 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool postJson(const char* url, const String& payload, int& httpCode, String& resposta);
-#line 79 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 314 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+String montarUrl(const char* rota);
+#line 318 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool verificarHealthBackend();
+#line 343 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool registrarSensoresNoBackend();
-#line 110 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 376 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void conectarWifi();
-#line 137 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 403 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool enviarEvento(const SensorConfig& sensor);
-#line 161 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 427 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool enviarHeartbeatDispositivo();
+#line 442 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void configurarPinoSensor(uint8_t pin, TipoLigacao ligacao);
+#line 450 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void setupSensores();
-#line 174 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 463 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void setup();
-#line 190 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 481 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void loop();
-#line 33 "U:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 57 "D:\\build\\sensor\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool pinoGpioLocalPermitido(int pin) {
+  for (uint8_t permitido : PINOS_GPIO_LOCAL) {
+    if (pin == permitido) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void alimentarWatchdog() {
+  if (watchdogAtivo) {
+    esp_task_wdt_reset();
+  }
+}
+
+void delayComWatchdog(unsigned long duracaoMs) {
+  // Mantem o watchdog alimentado durante piscadas e esperas curtas.
+  unsigned long inicio = millis();
+  while (millis() - inicio < duracaoMs) {
+    alimentarWatchdog();
+    delay(20);
+  }
+}
+
+void reiniciarDispositivo(const char* motivo) {
+  Serial.print("Reiniciando: ");
+  Serial.println(motivo);
+  Serial.flush();
+  delay(100);
+  ESP.restart();
+}
+
+void setupWatchdog() {
+  // Reinicia automaticamente se a task principal travar e parar de alimentar o watchdog.
+  esp_task_wdt_config_t wdtConfig = {
+    .timeout_ms = WATCHDOG_TIMEOUT_SECONDS * 1000,
+    .idle_core_mask = 0,
+    .trigger_panic = true
+  };
+
+  esp_err_t err = esp_task_wdt_init(&wdtConfig);
+  if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
+    err = esp_task_wdt_add(NULL);
+  }
+
+  watchdogAtivo = err == ESP_OK || err == ESP_ERR_INVALID_STATE;
+  Serial.print("Watchdog: ");
+  Serial.println(watchdogAtivo ? "ativo" : "falha ao ativar");
+}
+
 void setLedColor(uint8_t red, uint8_t green, uint8_t blue) {
 #if defined(RGB_BUILTIN)
   rgbLedWrite(RGB_BUILTIN, red, green, blue);
@@ -66,20 +178,180 @@ void setLedColor(uint8_t red, uint8_t green, uint8_t blue) {
 void piscarStatus(uint8_t red, uint8_t green, uint8_t blue, uint8_t repeticoes, unsigned long intervaloMs) {
   for (uint8_t i = 0; i < repeticoes; i++) {
     setLedColor(red, green, blue);
-    delay(intervaloMs);
+    delayComWatchdog(intervaloMs);
     setLedColor(0, 0, 0);
-    delay(intervaloMs);
+    delayComWatchdog(intervaloMs);
   }
 }
 
 void acenderStatus(uint8_t red, uint8_t green, uint8_t blue, unsigned long duracaoMs) {
   setLedColor(red, green, blue);
-  delay(duracaoMs);
+  delayComWatchdog(duracaoMs);
   setLedColor(0, 0, 0);
+}
+
+void piscarStatusPorDuracao(uint8_t red, uint8_t green, uint8_t blue, unsigned long duracaoMs, unsigned long intervaloMs) {
+  unsigned long inicio = millis();
+  while (millis() - inicio < duracaoMs) {
+    setLedColor(red, green, blue);
+    delayComWatchdog(intervaloMs);
+    setLedColor(0, 0, 0);
+    delayComWatchdog(intervaloMs);
+  }
 }
 
 String montarSensorId(const SensorConfig& sensor) {
   return String(DEVICE_ID) + ":" + String(sensor.id);
+}
+
+String extrairCampoJsonString(const String& payload, const char* chave) {
+  String marcador = "\"" + String(chave) + "\"";
+  int inicioChave = payload.indexOf(marcador);
+  if (inicioChave < 0) {
+    return "";
+  }
+
+  int inicioValor = payload.indexOf(':', inicioChave);
+  if (inicioValor < 0) {
+    return "";
+  }
+  inicioValor = payload.indexOf('"', inicioValor);
+  if (inicioValor < 0) {
+    return "";
+  }
+  int fimValor = payload.indexOf('"', inicioValor + 1);
+  if (fimValor < 0) {
+    return "";
+  }
+  return payload.substring(inicioValor + 1, fimValor);
+}
+
+int extrairCampoJsonInt(const String& payload, const char* chave, int valorPadrao) {
+  String marcador = "\"" + String(chave) + "\"";
+  int inicioChave = payload.indexOf(marcador);
+  if (inicioChave < 0) {
+    return valorPadrao;
+  }
+
+  int inicioValor = payload.indexOf(':', inicioChave);
+  if (inicioValor < 0) {
+    return valorPadrao;
+  }
+
+  inicioValor++;
+  while (inicioValor < payload.length() && (payload[inicioValor] == ' ' || payload[inicioValor] == '\t')) {
+    inicioValor++;
+  }
+
+  int fimValor = inicioValor;
+  while (fimValor < payload.length() && isDigit(payload[fimValor])) {
+    fimValor++;
+  }
+
+  if (fimValor == inicioValor) {
+    return valorPadrao;
+  }
+  return payload.substring(inicioValor, fimValor).toInt();
+}
+
+void responderJsonLocal(int httpCode, const String& corpo) {
+  deviceServer.send(httpCode, "application/json", corpo);
+}
+
+void configurarGpioLocalInativo(uint8_t pin, bool ativoEmHigh) {
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, ativoEmHigh ? LOW : HIGH);
+}
+
+void acionarGpioLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs, uint8_t repeticoes) {
+  uint8_t nivelAtivo = ativoEmHigh ? HIGH : LOW;
+  uint8_t nivelInativo = ativoEmHigh ? LOW : HIGH;
+
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, nivelInativo);
+
+  for (uint8_t i = 0; i < repeticoes; i++) {
+    digitalWrite(pin, nivelAtivo);
+    delayComWatchdog(duracaoMs);
+    digitalWrite(pin, nivelInativo);
+
+    if (i + 1 < repeticoes) {
+      delayComWatchdog(LOCAL_GPIO_GAP_MS);
+    }
+  }
+}
+
+void processarPulsoGpioLocal() {
+  if (deviceServer.method() != HTTP_POST) {
+    responderJsonLocal(405, "{\"ok\":false,\"error\":\"method_not_allowed\"}");
+    return;
+  }
+
+  String payload = deviceServer.arg("plain");
+  int pin = extrairCampoJsonInt(payload, "pin", -1);
+  int durationMs = extrairCampoJsonInt(payload, "duration_ms", 1000);
+  int repeatCount = extrairCampoJsonInt(payload, "repeat_count", 1);
+  String activeLevel = extrairCampoJsonString(payload, "active_level");
+  activeLevel.toUpperCase();
+
+  if (!pinoGpioLocalPermitido(pin)) {
+    responderJsonLocal(400, "{\"ok\":false,\"error\":\"invalid_pin\"}");
+    return;
+  }
+
+  if (activeLevel != "HIGH" && activeLevel != "LOW") {
+    responderJsonLocal(400, "{\"ok\":false,\"error\":\"invalid_active_level\"}");
+    return;
+  }
+
+  if (durationMs < 50) durationMs = 50;
+  if (durationMs > 600000) durationMs = 600000;
+  if (repeatCount < 1) repeatCount = 1;
+  if (repeatCount > 20) repeatCount = 20;
+
+  bool ativoEmHigh = activeLevel == "HIGH";
+  Serial.print("GPIO local acionado no pino ");
+  Serial.print(pin);
+  Serial.print(" nivel=");
+  Serial.print(activeLevel);
+  Serial.print(" duracaoMs=");
+  Serial.print(durationMs);
+  Serial.print(" repeticoes=");
+  Serial.println(repeatCount);
+
+  acionarGpioLocal(static_cast<uint8_t>(pin), ativoEmHigh, static_cast<unsigned long>(durationMs), static_cast<uint8_t>(repeatCount));
+  responderJsonLocal(200, "{\"ok\":true}");
+}
+
+void setupServidorLocal() {
+  for (uint8_t pin : PINOS_GPIO_LOCAL) {
+    configurarGpioLocalInativo(pin, true);
+  }
+
+  deviceServer.on("/gpio/pulse", HTTP_POST, processarPulsoGpioLocal);
+  deviceServer.on("/health", HTTP_GET, []() {
+    responderJsonLocal(200, "{\"ok\":true,\"service\":\"esp32-local-gpio\"}");
+  });
+  deviceServer.begin();
+  Serial.print("Servidor local GPIO em porta ");
+  Serial.println(DEVICE_COMMAND_PORT);
+}
+
+bool pinoEstaAtivo(uint8_t pin, TipoLigacao ligacao) {
+  bool leitura = digitalRead(pin);
+  return ligacao == LigacaoGpio3V3 ? leitura == HIGH : leitura == LOW;
+}
+
+bool sensorEstaAtivo(const SensorConfig& sensor) {
+  bool principalAtivo = pinoEstaAtivo(sensor.pinPrincipal, sensor.ligacao);
+  bool secundarioAtivo = false;
+
+  if (sensor.pinSecundario != PINO_SEM_SECUNDARIO) {
+    secundarioAtivo = pinoEstaAtivo(sensor.pinSecundario, sensor.ligacao);
+  }
+
+  // Redundancia: qualquer pino ativo indica movimento, sem duplicar evento.
+  return principalAtivo || secundarioAtivo;
 }
 
 bool postJson(const char* url, const String& payload, int& httpCode, String& resposta) {
@@ -94,11 +366,41 @@ bool postJson(const char* url, const String& payload, int& httpCode, String& res
     return false;
   }
 
+  http.setTimeout(3000);
   http.addHeader("Content-Type", "application/json");
   httpCode = http.POST(payload);
   resposta = http.getString();
   http.end();
   return true;
+}
+
+String montarUrl(const char* rota) {
+  return String(url_default) + rota;
+}
+
+bool verificarHealthBackend() {
+  // Confirma que a API local continua respondendo; falhas repetidas reiniciam o ESP.
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  HTTPClient http;
+  if (!http.begin(montarUrl(HEALTH_ROUTE))) {
+    return false;
+  }
+
+  http.setTimeout(3000);
+  int httpCode = http.GET();
+  String resposta = http.getString();
+  http.end();
+
+  Serial.print("GET health -> HTTP ");
+  Serial.println(httpCode);
+  if (resposta.length()) {
+    Serial.println(resposta);
+  }
+
+  return httpCode >= 200 && httpCode < 300;
 }
 
 bool registrarSensoresNoBackend() {
@@ -110,7 +412,9 @@ bool registrarSensoresNoBackend() {
     if (i > 0) payload += ",";
     payload += "{";
     payload += "\"sensor_id\":\"" + montarSensorId(sensores[i]) + "\",";
-    payload += "\"pin\":" + String(sensores[i].pin);
+    payload += "\"pin\":" + String(sensores[i].pinPrincipal) + ",";
+    payload += "\"enabled\":" + String(sensores[i].enabled ? "true" : "false") + ",";
+    payload += "\"show_on_dashboard\":" + String(sensores[i].showOnDashboard ? "true" : "false");
     payload += "}";
   }
 
@@ -118,7 +422,7 @@ bool registrarSensoresNoBackend() {
 
   int httpCode = 0;
   String resposta;
-  if (!postJson(SENSOR_REGISTER_URL, payload, httpCode, resposta)) {
+  if (!postJson(montarUrl(SENSOR_REGISTER_ROUTE).c_str(), payload, httpCode, resposta)) {
     return false;
   }
 
@@ -142,7 +446,7 @@ void conectarWifi() {
 
   unsigned long inicio = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - inicio < WIFI_RETRY_MS) {
-    delay(400);
+    delayComWatchdog(400);
     Serial.print(".");
   }
   Serial.println();
@@ -167,7 +471,7 @@ bool enviarEvento(const SensorConfig& sensor) {
   String payload = "{\"sensor_id\":\"" + montarSensorId(sensor) + "\"}";
   int httpCode = 0;
   String resposta;
-  if (!postJson(MOVEMENT_URL, payload, httpCode, resposta)) {
+  if (!postJson(montarUrl(MOVEMENT_ROUTE).c_str(), payload, httpCode, resposta)) {
     return false;
   }
 
@@ -183,21 +487,45 @@ bool enviarEvento(const SensorConfig& sensor) {
   return httpCode >= 200 && httpCode < 300;
 }
 
+bool enviarHeartbeatDispositivo() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  String payload = "{\"device_id\":\"" + String(DEVICE_ID) + "\",\"command_port\":" + String(DEVICE_COMMAND_PORT) + "}";
+  int httpCode = 0;
+  String resposta;
+  if (!postJson(montarUrl(HEARTBEAT_ROUTE).c_str(), payload, httpCode, resposta)) {
+    return false;
+  }
+
+  return httpCode >= 200 && httpCode < 300;
+}
+
+void configurarPinoSensor(uint8_t pin, TipoLigacao ligacao) {
+  if (ligacao == LigacaoGpio3V3) {
+    pinMode(pin, INPUT_PULLDOWN);
+  } else {
+    pinMode(pin, INPUT_PULLUP);
+  }
+}
+
 void setupSensores() {
   for (size_t i = 0; i < TOTAL_SENSORES; i++) {
-    if (sensores[i].usePulldown) {
-      pinMode(sensores[i].pin, INPUT_PULLDOWN);
-    } else {
-      pinMode(sensores[i].pin, INPUT);
+    configurarPinoSensor(sensores[i].pinPrincipal, sensores[i].ligacao);
+
+    if (sensores[i].pinSecundario != PINO_SEM_SECUNDARIO) {
+      configurarPinoSensor(sensores[i].pinSecundario, sensores[i].ligacao);
     }
 
-    bool estadoBruto = digitalRead(sensores[i].pin);
-    sensores[i].lastState = sensores[i].activeHigh ? estadoBruto : !estadoBruto;
+    // Evita evento falso no boot: o primeiro estado vira a referencia inicial.
+    sensores[i].lastState = sensorEstaAtivo(sensores[i]);
   }
 }
 
 void setup() {
   Serial.begin(115200);
+  setupWatchdog();
 
 #if defined(RGB_BUILTIN)
   pinMode(RGB_BUILTIN, OUTPUT);
@@ -207,13 +535,26 @@ void setup() {
   setLedColor(0, 0, 0);
 
   setupSensores();
+  setupServidorLocal();
   conectarWifi();
 
   Serial.println("Hub de sensores iniciado.");
 }
 
 void loop() {
+  alimentarWatchdog();
+  deviceServer.handleClient();
   unsigned long agora = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (wifiDesconectadoDesdeMs == 0) {
+      wifiDesconectadoDesdeMs = agora;
+    } else if (agora - wifiDesconectadoDesdeMs >= WIFI_MAX_OFFLINE_MS) {
+      reiniciarDispositivo("WiFi offline por tempo limite");
+    }
+  } else {
+    wifiDesconectadoDesdeMs = 0;
+  }
 
   if (WiFi.status() != WL_CONNECTED && agora - ultimoWifiRetryMs >= WIFI_RETRY_MS) {
     ultimoWifiRetryMs = agora;
@@ -224,22 +565,37 @@ void loop() {
     registrarSensoresNoBackend();
   }
 
+  if (WiFi.status() == WL_CONNECTED && agora - ultimoHeartbeatMs >= DEVICE_HEARTBEAT_MS) {
+    ultimoHeartbeatMs = agora;
+    enviarHeartbeatDispositivo();
+  }
+
+  if (WiFi.status() == WL_CONNECTED && agora - ultimoHealthCheckMs >= HEALTH_CHECK_MS) {
+    ultimoHealthCheckMs = agora;
+    if (verificarHealthBackend()) {
+      falhasHealth = 0;
+    } else if (++falhasHealth >= HEALTH_MAX_FALHAS) {
+      reiniciarDispositivo("falhas consecutivas no health do backend");
+    }
+  }
+
   if (agora - ultimoPollMs < SENSOR_POLL_MS) {
     return;
   }
   ultimoPollMs = agora;
 
   for (size_t i = 0; i < TOTAL_SENSORES; i++) {
-    bool leituraBruta = digitalRead(sensores[i].pin);
-    bool movimentoAtivo = sensores[i].activeHigh ? leituraBruta : !leituraBruta;
+    bool movimentoAtivo = sensorEstaAtivo(sensores[i]);
+    // Evento so nasce na transicao sem movimento -> com movimento.
     bool bordaSubida = movimentoAtivo && !sensores[i].lastState;
 
     if (bordaSubida) {
       Serial.print("Movimento detectado em ");
       Serial.println(sensores[i].id);
-      acenderStatus(32, 0, 0, 3000);
+      bool eventoEnviado = enviarEvento(sensores[i]);
+      piscarStatusPorDuracao(0, 64, 0, 400, 100);
 
-      if (enviarEvento(sensores[i])) {
+      if (eventoEnviado) {
         piscarStatus(0, 0, 32, 1, 80);
       } else {
         piscarStatus(32, 0, 0, 1, 100);
