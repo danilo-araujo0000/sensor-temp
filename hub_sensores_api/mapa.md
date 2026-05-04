@@ -1,14 +1,37 @@
-D do sensor	GPIO	Ativo	Aparece dashboard
-4	GPIO 4	Sim	Sim
-5	GPIO 5	Sim	Sim
-15	GPIO 15	Sim	Sim
-17	GPIO 17	Sim	Sim
-18	GPIO 18	Sim	Sim
-35	GPIO 35	Sim	Sim
-37	GPIO 37	Sim	Sim
-40	GPIO 40	Sim	Sim
-42	GPIO 42	Sim	Sim
-10	GPIO 10	Não	Não
-11	GPIO 11	Não	Não
-12	GPIO 12	Não	Não
-13	GPIO 13	Não	Não
+# Mapa de GPIOs do Hub
+
+## Sensores de movimento
+
+| ID do sensor | GPIO | Ativo | Dashboard |
+|---|---:|---:|---:|
+| 35 | GPIO 35 | Sim | Sim |
+| 36 | GPIO 36 | Sim | Sim |
+| 40 | GPIO 40 | Sim | Sim |
+| 42 | GPIO 42 | Sim | Sim |
+| 47 | GPIO 47 | Sim | Sim |
+| 48 | GPIO 48 | Sim | Sim |
+
+## Gatilhos locais independentes
+
+Entradas em GND que disparam regras locais no proprio ESP, sem backend no momento do evento:
+
+- GPIO 4
+- GPIO 5
+- GPIO 6
+- GPIO 7
+
+## Saidas locais dos gatilhos independentes
+
+- GPIO 10
+- GPIO 11
+- GPIO 12
+- GPIO 13
+
+## Saidas locais da automacao dos sensores
+
+Usadas pela automacao por sensor (`movimento` / `sem movimento por X tempo`):
+
+- GPIO 15
+- GPIO 16
+- GPIO 17
+- GPIO 18

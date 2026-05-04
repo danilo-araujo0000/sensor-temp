@@ -103,7 +103,11 @@ MODERATOR_API_BASE_URL = env_value("MODERATOR_API_BASE_URL", "").rstrip("/")
 MODERATOR_API_USERNAME = env_value("MODERATOR_API_USERNAME", "")
 MODERATOR_API_PASSWORD = env_value("MODERATOR_API_PASSWORD", "")
 MODERATOR_API_TIMEOUT_SECONDS = max(env_int("MODERATOR_API_TIMEOUT_SECONDS", 15), 3)
-LOCAL_GPIO_ALLOWED_PINS = (4, 5, 6, 7)
+SENSOR_AUTOMATION_GPIO_ALLOWED_PINS = (15, 16, 17, 18)
+LOCAL_TRIGGER_OUTPUT_ALLOWED_PINS = (10, 11, 12, 13)
+LOCAL_TRIGGER_ALLOWED_PINS = (4, 5, 6, 7)
+LOCAL_TRIGGER_DEFAULT_OUTPUT_PIN = 10
+LOCAL_TRIGGER_RULE_MAX_MS = 600000
 LOCAL_GPIO_PULSE_GAP_MS = 250
 
 
@@ -242,6 +246,26 @@ def init_db() -> None:
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_phone
             ON contacts(phone)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_local_gpio_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                trigger_pin INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                output_pin INTEGER,
+                output_level TEXT NOT NULL DEFAULT 'HIGH',
+                hold_ms INTEGER NOT NULL DEFAULT 1000,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_device_local_gpio_rules_device_trigger
+            ON device_local_gpio_rules(device_id, trigger_pin)
             """
         )
         conn.commit()
@@ -422,7 +446,23 @@ def sanitize_gpio_pin(pin: object) -> int | None:
         normalized = int(pin)
     except (TypeError, ValueError):
         return None
-    return normalized if normalized in LOCAL_GPIO_ALLOWED_PINS else None
+    return normalized if normalized in SENSOR_AUTOMATION_GPIO_ALLOWED_PINS else None
+
+
+def sanitize_local_trigger_pin(pin: object) -> int | None:
+    try:
+        normalized = int(pin)
+    except (TypeError, ValueError):
+        return None
+    return normalized if normalized in LOCAL_TRIGGER_ALLOWED_PINS else None
+
+
+def sanitize_local_output_pin(pin: object) -> int | None:
+    try:
+        normalized = int(pin)
+    except (TypeError, ValueError):
+        return None
+    return normalized if normalized in LOCAL_TRIGGER_OUTPUT_ALLOWED_PINS else None
 
 
 def sanitize_gpio_level(level: object, default: str = "HIGH") -> str:
@@ -444,6 +484,14 @@ def sanitize_gpio_repeat_count(value: object, default: int = 1) -> int:
     except (TypeError, ValueError):
         return default
     return min(max(normalized, 1), 20)
+
+
+def sanitize_local_rule_hold_ms(value: object, default: int = 1000) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(normalized, 50), LOCAL_TRIGGER_RULE_MAX_MS)
 
 
 def external_api_ready() -> bool:
@@ -548,6 +596,249 @@ def reset_idle_trigger(sensor_id: str) -> None:
             (agora, sensor_id),
         )
         conn.commit()
+
+
+def fetch_device_runtime(device_id: str) -> dict | None:
+    normalized = device_id.strip()
+    if not normalized:
+        return None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT device_id, device_last_seen_ip, device_command_port, device_last_seen_epoch
+            FROM sensors
+            WHERE device_id = ?
+            ORDER BY COALESCE(device_last_seen_epoch, 0) DESC, updated_at DESC
+            LIMIT 1
+            """,
+            (normalized,),
+        ).fetchone()
+
+    return dict(row) if row else None
+
+
+def default_device_local_gpio_rules(device_id: str) -> list[dict]:
+    return [
+        {
+            "device_id": device_id,
+            "trigger_pin": trigger_pin,
+            "enabled": False,
+            "output_pin": LOCAL_TRIGGER_DEFAULT_OUTPUT_PIN,
+            "output_level": "HIGH",
+            "hold_ms": 1000,
+        }
+        for trigger_pin in LOCAL_TRIGGER_ALLOWED_PINS
+    ]
+
+
+def fetch_device_local_gpio_rules(device_id: str) -> list[dict]:
+    normalized = device_id.strip()
+    rules_by_trigger = {
+        rule["trigger_pin"]: rule for rule in default_device_local_gpio_rules(normalized)
+    }
+
+    if not normalized:
+        return list(rules_by_trigger.values())
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT trigger_pin, enabled, output_pin, output_level, hold_ms
+            FROM device_local_gpio_rules
+            WHERE device_id = ?
+            ORDER BY trigger_pin
+            """,
+            (normalized,),
+        ).fetchall()
+
+    for row in rows:
+        trigger_pin = sanitize_local_trigger_pin(row["trigger_pin"])
+        if trigger_pin is None:
+            continue
+        output_pin = sanitize_local_output_pin(row["output_pin"])
+        rules_by_trigger[trigger_pin] = {
+            "device_id": normalized,
+            "trigger_pin": trigger_pin,
+            "enabled": bool(row["enabled"]),
+            "output_pin": output_pin if output_pin is not None else LOCAL_TRIGGER_DEFAULT_OUTPUT_PIN,
+            "output_level": sanitize_gpio_level(row["output_level"], "HIGH"),
+            "hold_ms": sanitize_local_rule_hold_ms(row["hold_ms"], 1000),
+        }
+
+    return [rules_by_trigger[trigger_pin] for trigger_pin in LOCAL_TRIGGER_ALLOWED_PINS]
+
+
+def validate_device_local_gpio_rules(rules: list[dict]) -> None:
+    if not isinstance(rules, list):
+        raise ValueError("rules_required")
+
+    seen_triggers: set[int] = set()
+    active_triggers: set[int] = set()
+    active_outputs: set[int] = set()
+
+    for rule in rules:
+        trigger_pin = sanitize_local_trigger_pin(rule.get("trigger_pin"))
+        if trigger_pin is None:
+            raise ValueError("invalid_trigger_pin")
+        if trigger_pin in seen_triggers:
+            raise ValueError("duplicate_trigger_pin")
+        seen_triggers.add(trigger_pin)
+
+        enabled = bool(rule.get("enabled"))
+        output_pin = sanitize_local_output_pin(rule.get("output_pin"))
+        if output_pin is None:
+            raise ValueError("invalid_output_pin")
+
+        if not enabled:
+            continue
+        if output_pin == trigger_pin:
+            raise ValueError("trigger_output_conflict")
+        if output_pin in active_outputs:
+            raise ValueError("duplicate_output_pin")
+
+        active_triggers.add(trigger_pin)
+        active_outputs.add(output_pin)
+
+    if active_triggers & active_outputs:
+        raise ValueError("trigger_output_overlap")
+
+
+def save_device_local_gpio_rules(device_id: str, rules: list[dict]) -> list[dict]:
+    normalized = device_id.strip()
+    validate_device_local_gpio_rules(rules)
+    agora = app_now().isoformat()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM device_local_gpio_rules WHERE device_id = ?", (normalized,))
+        for rule in rules:
+            trigger_pin = sanitize_local_trigger_pin(rule.get("trigger_pin"))
+            output_pin = sanitize_local_output_pin(rule.get("output_pin"))
+            conn.execute(
+                """
+                INSERT INTO device_local_gpio_rules (
+                    device_id, trigger_pin, enabled, output_pin, output_level, hold_ms, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized,
+                    trigger_pin,
+                    1 if bool(rule.get("enabled")) else 0,
+                    output_pin,
+                    sanitize_gpio_level(rule.get("output_level"), "HIGH"),
+                    sanitize_local_rule_hold_ms(rule.get("hold_ms"), 1000),
+                    agora,
+                ),
+            )
+        conn.commit()
+
+    return fetch_device_local_gpio_rules(normalized)
+
+
+def push_device_local_gpio_rules(device_id: str, rules: list[dict]) -> dict:
+    runtime = fetch_device_runtime(device_id)
+    if runtime is None:
+        return {"ok": False, "reason": "device_not_found"}
+
+    device_ip = str(runtime.get("device_last_seen_ip") or "").strip()
+    if not device_ip:
+        return {"ok": False, "reason": "device_ip_unknown"}
+
+    raw_port = runtime.get("device_command_port")
+    try:
+        command_port = int(raw_port)
+    except (TypeError, ValueError):
+        command_port = 8088
+    if command_port <= 0:
+        command_port = 8088
+
+    base_url = f"http://{device_ip}:{command_port}"
+
+    try:
+        reset_request = Request(
+            f"{base_url}/local-trigger-rules/reset",
+            data=b"{}",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(reset_request, timeout=5) as response:
+            response.read()
+
+        for rule in rules:
+            body = json.dumps(
+                {
+                    "trigger_pin": int(rule["trigger_pin"]),
+                    "enabled": bool(rule["enabled"]),
+                    "output_pin": int(rule["output_pin"]),
+                    "output_level": sanitize_gpio_level(rule["output_level"], "HIGH"),
+                    "hold_ms": int(rule["hold_ms"]),
+                }
+            ).encode("utf-8")
+            request = Request(
+                f"{base_url}/local-trigger-rule",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=5) as response:
+                response.read()
+    except HTTPError as exc:
+        text = exc.read().decode("utf-8", errors="replace")
+        return {"ok": False, "reason": f"http_{exc.code}", "response": text[:300]}
+    except URLError as exc:
+        return {"ok": False, "reason": f"network_error:{exc.reason}"}
+
+    return {
+        "ok": True,
+        "device_ip": device_ip,
+        "command_port": command_port,
+        "rules_sent": len(rules),
+    }
+
+
+def update_device_local_gpio_rules(payload: dict) -> dict | None:
+    sensor_id = str(payload.get("sensor_id", "")).strip()
+    if not sensor_id:
+        raise ValueError("sensor_id_required")
+
+    sensor = fetch_sensor(sensor_id)
+    if sensor is None:
+        return None
+
+    raw_rules = payload.get("rules")
+    if not isinstance(raw_rules, list):
+        raise ValueError("rules_required")
+
+    normalized_rules = []
+    for trigger_pin in LOCAL_TRIGGER_ALLOWED_PINS:
+        raw_rule = next(
+            (
+                item for item in raw_rules
+                if sanitize_local_trigger_pin((item or {}).get("trigger_pin")) == trigger_pin
+            ),
+            None,
+        )
+        normalized_rules.append(
+            {
+                "trigger_pin": trigger_pin,
+                "enabled": bool(raw_rule.get("enabled")) if isinstance(raw_rule, dict) else False,
+                "output_pin": sanitize_local_output_pin(raw_rule.get("output_pin")) if isinstance(raw_rule, dict) else LOCAL_TRIGGER_DEFAULT_OUTPUT_PIN,
+                "output_level": sanitize_gpio_level(raw_rule.get("output_level"), "HIGH") if isinstance(raw_rule, dict) else "HIGH",
+                "hold_ms": sanitize_local_rule_hold_ms(raw_rule.get("hold_ms"), 1000) if isinstance(raw_rule, dict) else 1000,
+            }
+        )
+
+    device_id = str(sensor["device_id"])
+    saved_rules = save_device_local_gpio_rules(device_id, normalized_rules)
+    sync_result = push_device_local_gpio_rules(device_id, saved_rules)
+    return {
+        "device_id": device_id,
+        "rules": saved_rules,
+        "sync": sync_result,
+    }
 
 
 def external_api_request(path: str, method: str = "GET", payload: dict | None = None) -> dict:
@@ -1392,7 +1683,25 @@ def update_sensor_automation(payload: dict) -> dict | None:
     return dict(updated) if updated else None
 
 
-def should_run_automation(sensor: sqlite3.Row | dict, event_name: str, condition_key: str, now_epoch: int) -> bool:
+def idle_state_is_latched(sensor: sqlite3.Row | dict, last_motion_epoch: int) -> bool:
+    sensor_dict = dict(sensor)
+    idle_triggered_epoch = sensor_dict.get("automation_idle_triggered_epoch")
+    if idle_triggered_epoch is None:
+        return False
+    try:
+        return int(idle_triggered_epoch) >= int(last_motion_epoch)
+    except (TypeError, ValueError):
+        return False
+
+
+def should_run_automation(
+    sensor: sqlite3.Row | dict,
+    event_name: str,
+    condition_key: str,
+    now_epoch: int,
+    *,
+    last_motion_epoch: int | None = None,
+) -> bool:
     sensor_dict = dict(sensor)
     if not bool(sensor_dict.get("automation_enabled")):
         return False
@@ -1402,6 +1711,13 @@ def should_run_automation(sensor: sqlite3.Row | dict, event_name: str, condition
     repeat_mode = sanitize_repeat_mode(sensor_dict.get("automation_repeat_mode"), "once")
     last_condition_key = str(sensor_dict.get("automation_last_condition_key") or "")
     last_trigger_epoch = sensor_dict.get("automation_last_trigger_epoch")
+
+    if event_name == "idle" and last_motion_epoch is not None:
+        latched = idle_state_is_latched(sensor_dict, last_motion_epoch)
+        if repeat_mode == "once":
+            return not latched
+        if not latched:
+            return True
 
     if repeat_mode == "once":
         return last_condition_key != condition_key
@@ -1450,7 +1766,13 @@ def evaluate_and_run_sensor_automation(
             return {"ok": False, "reason": "condition_inactive"}
         condition_key = f"idle:{last_motion_epoch}"
 
-    if not force and not should_run_automation(sensor, event_name, condition_key, now_epoch):
+    if not force and not should_run_automation(
+        sensor,
+        event_name,
+        condition_key,
+        now_epoch,
+        last_motion_epoch=last_motion_epoch,
+    ):
         return {"ok": False, "reason": "repeat_window_active"}
 
     automation_target = sanitize_automation_target(sensor_dict.get("automation_target"), "external_api")
@@ -1500,6 +1822,22 @@ def evaluate_and_run_sensor_automation(
             condition_key=condition_key,
         )
     return result
+
+
+def run_motion_automation_async(sensor_id: str, event_time: datetime) -> None:
+    try:
+        sensor = fetch_sensor(sensor_id)
+        if sensor is None:
+            return
+        if sanitize_trigger(dict(sensor).get("automation_trigger"), "motion") == "motion":
+            evaluate_and_run_sensor_automation(sensor, "motion", event_time, force=True)
+    except Exception as exc:
+        update_sensor_automation_status(
+            sensor_id,
+            event_name="motion",
+            status="error",
+            response_text=str(exc),
+        )
 
 
 def run_idle_automation_checks() -> None:
@@ -1680,17 +2018,11 @@ def insert_movement(payload: dict) -> dict:
 
     reset_idle_trigger(sensor_id)
 
-    try:
-        updated_sensor = fetch_sensor(sensor_id) or sensor
-        if sanitize_trigger(dict(updated_sensor).get("automation_trigger"), "motion") == "motion":
-            evaluate_and_run_sensor_automation(updated_sensor, "motion", agora, force=True)
-    except Exception as exc:
-        update_sensor_automation_status(
-            sensor_id,
-            event_name="motion",
-            status="error",
-            response_text=str(exc),
-        )
+    threading.Thread(
+        target=run_motion_automation_async,
+        args=(sensor_id, agora),
+        daemon=True,
+    ).start()
 
     return {
         "stored": True,
@@ -1904,6 +2236,7 @@ def get_sensor_detail(sensor_id: str, range_key: str) -> dict | None:
         )
 
     sensor_dict = dict(sensor)
+    device_local_gpio_rules = fetch_device_local_gpio_rules(sensor_dict["device_id"])
     sensor_dict["enabled"] = bool(sensor_dict["enabled"])
     sensor_dict["device_online"] = is_device_online(sensor_dict, now_epoch)
     recent_motion = last_motion_epoch is not None and now_epoch - last_motion_epoch <= RECENT_MOTION_SECONDS
@@ -1976,6 +2309,10 @@ def get_sensor_detail(sensor_id: str, range_key: str) -> dict | None:
             "device_last_seen_epoch": sensor_dict.get("device_last_seen_epoch"),
             "device_last_seen_ip": sensor_dict.get("device_last_seen_ip", "") or "",
             "device_command_port": sensor_dict.get("device_command_port"),
+            "device_local_gpio_rules": device_local_gpio_rules,
+            "device_local_trigger_pins": list(LOCAL_TRIGGER_ALLOWED_PINS),
+            "device_local_output_pins": list(LOCAL_TRIGGER_OUTPUT_ALLOWED_PINS),
+            "sensor_automation_output_pins": list(SENSOR_AUTOMATION_GPIO_ALLOWED_PINS),
             "status_label": status_label,
             "tone": tone,
             "registered_at": sensor_dict["registered_at"],
@@ -2532,6 +2869,19 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                     self._send_json(HTTPStatus.OK, {"ok": True, **result})
             except Exception as e:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(e)})
+            return
+
+        if parsed.path == "/api/devices/local-gpio-rules":
+            try:
+                result = update_device_local_gpio_rules(payload)
+                if result is None:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "sensor_not_found"})
+                else:
+                    self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
             return
 
         if parsed.path == "/api/sensors/automation/test":

@@ -3,7 +3,7 @@
   "compiler.optimization_flags": "-Os",
   "customBuildProperties": "",
   "fqbn": "esp32:esp32:esp32s3",
-  "hardwareFolders": "C:\\Users\\dbispo\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.8,C:\\Users\\dbispo\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.8",
-  "otherLibrariesFolders": "C:\\Users\\dbispo\\Documents\\Arduino\\libraries",
-  "sketchLocation": "D:\\build\\sensor\\sensor-temp\\hub_sensores_api"
+  "hardwareFolders": "C:\\Users\\danilo\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.8,C:\\Users\\danilo\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.8",
+  "otherLibrariesFolders": "C:\\Users\\danilo\\Documents\\Arduino\\libraries",
+  "sketchLocation": "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api"
 }

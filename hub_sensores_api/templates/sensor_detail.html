@@ -605,6 +605,7 @@
       .automation-actions { flex-direction: column; align-items: stretch; }
       .automation-actions .btn { width: 100%; text-align: center; }
       .automation-actions .subline { width: 100%; text-align: left; margin-bottom: 4px; }
+      .local-trigger-rule-row { grid-template-columns: 1fr; }
       .filter-row { gap: 8px; }
       .filter-btn { flex: 1 1 calc(50% - 8px); min-width: 0; text-align: center; }
       .chart { gap: 6px; min-height: 220px; padding-top: 16px; }
@@ -681,6 +682,33 @@
       gap: 12px;
       flex-wrap: wrap;
       margin-top: 16px;
+    }
+    .local-trigger-grid {
+      display: grid;
+      gap: 12px;
+    }
+    .local-trigger-rule-row {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 90px;
+      gap: 12px;
+      align-items: end;
+      padding: 14px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .local-trigger-rule-pin {
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: #fff;
+    }
+    .local-trigger-rule-check {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 44px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
     }
     .bottom-actions {
       display: grid;
@@ -866,10 +894,10 @@
               <div class="form-group auto-gpio-group">
                 <label>Pino local</label>
                 <select id="auto-gpio-pin" class="form-control automation-input">
-                  <option value="4">GPIO 4</option>
-                  <option value="5">GPIO 5</option>
-                  <option value="6">GPIO 6</option>
-                  <option value="7">GPIO 7</option>
+                  <option value="15">GPIO 15</option>
+                  <option value="16">GPIO 16</option>
+                  <option value="17">GPIO 17</option>
+                  <option value="18">GPIO 18</option>
                 </select>
               </div>
               <div class="form-group auto-gpio-group">
@@ -922,6 +950,20 @@
               <button id="refresh-external-devices" class="btn" type="button">Atualizar Dispositivos</button>
               <button id="auto-test" class="btn" type="button">Testar Gatilho</button>
               <button id="save-automation" class="btn primary" type="button">Salvar Automacao</button>
+            </div>
+          </div>
+
+          <div id="local-trigger-status-box" class="automation-status-box">Carregando gatilhos locais do ESP32...</div>
+
+          <div class="automation-card">
+            <div class="automation-card-header">
+              <h4 class="automation-card-title">Gatilhos locais do ESP32</h4>
+              <span class="section-subline" style="margin:0;">Pulso em GND no pino de entrada aciona uma saida local sem depender do backend.</span>
+            </div>
+            <div id="local-trigger-rules" class="local-trigger-grid"></div>
+            <div class="automation-actions">
+              <span id="save-local-rules-feedback" class="subline" style="margin:0;"></span>
+              <button id="save-local-rules" class="btn primary" type="button">Salvar no ESP</button>
             </div>
           </div>
         </div>
@@ -1232,7 +1274,7 @@
       document.getElementById('auto-target').value = detail.sensor.automation_target || 'external_api';
       document.getElementById('auto-trigger').value = detail.sensor.automation_trigger || 'motion';
       document.getElementById('auto-idle-minutes').value = detail.sensor.automation_idle_minutes || 10;
-      document.getElementById('auto-gpio-pin').value = String(detail.sensor.automation_gpio_pin || 4);
+      document.getElementById('auto-gpio-pin').value = String(detail.sensor.automation_gpio_pin || 15);
       document.getElementById('auto-gpio-level').value = detail.sensor.automation_gpio_level || 'HIGH';
       document.getElementById('auto-gpio-duration-ms').value = detail.sensor.automation_gpio_duration_ms || 1000;
       document.getElementById('auto-gpio-repeat-count').value = detail.sensor.automation_gpio_repeat_count || 1;
@@ -1248,6 +1290,63 @@
       );
       updateAutomationFieldVisibility();
       renderAutomationStatus(detail);
+    }
+
+    function renderLocalTriggerStatus(detail, syncResult) {
+      const box = document.getElementById('local-trigger-status-box');
+      const deviceIp = detail.sensor.device_last_seen_ip || 'desconhecido';
+      const commandPort = detail.sensor.device_command_port || 8088;
+      const enabledRules = (detail.sensor.device_local_gpio_rules || []).filter((rule) => !!rule.enabled);
+      if (syncResult && syncResult.ok) {
+        box.textContent = `Regras locais sincronizadas com ${syncResult.rules_sent} gatilhos no ESP ${syncResult.device_ip}:${syncResult.command_port}.`;
+        return;
+      }
+      if (syncResult && !syncResult.ok) {
+        box.textContent = `Regras salvas no backend, mas o ESP nao confirmou a sincronizacao. Motivo: ${syncResult.reason || 'desconhecido'}. Hub atual: ${deviceIp}:${commandPort}.`;
+        return;
+      }
+      box.textContent = `Hub em ${deviceIp}:${commandPort}. ${enabledRules.length} gatilho(s) local(is) ativo(s). Entradas aceitam pulso em GND e a saida local dispara sem chamar o backend no momento do evento.`;
+    }
+
+    function renderLocalTriggerRules(detail) {
+      if (window.isLocalRuleEditing) return;
+      const container = document.getElementById('local-trigger-rules');
+      const rules = detail.sensor.device_local_gpio_rules || [];
+      const outputPins = detail.sensor.device_local_output_pins || [];
+      container.innerHTML = rules.map((rule) => `
+        <div class="local-trigger-rule-row" data-trigger-pin="${rule.trigger_pin}">
+          <div class="local-trigger-rule-pin">GPIO ${rule.trigger_pin}<div style="margin-top:6px; color:var(--text-muted); font-size:0.78rem;">Pulso em GND</div></div>
+          <div class="local-trigger-rule-check">
+            <label class="switch" style="width: 40px; height: 22px;">
+              <input class="local-rule-input local-rule-enabled" type="checkbox" ${rule.enabled ? 'checked' : ''} />
+              <span class="slider"></span>
+            </label>
+            <span>Ativo</span>
+          </div>
+          <div class="form-group" style="margin:0;">
+            <label>Saida local</label>
+            <select class="form-control local-rule-input local-rule-output">
+              ${outputPins.map((pin) => `<option value="${pin}" ${Number(rule.output_pin) === Number(pin) ? 'selected' : ''}>GPIO ${pin}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group" style="margin:0;">
+            <label>Nivel da saida</label>
+            <select class="form-control local-rule-input local-rule-level">
+              <option value="HIGH" ${rule.output_level === 'HIGH' ? 'selected' : ''}>HIGH (VCC)</option>
+              <option value="LOW" ${rule.output_level === 'LOW' ? 'selected' : ''}>LOW (GND)</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin:0;">
+            <label>Tempo (ms)</label>
+            <input class="form-control local-rule-input local-rule-hold" type="number" min="50" step="50" value="${rule.hold_ms || 1000}" />
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function syncLocalTriggerControls(detail, syncResult = null) {
+      renderLocalTriggerRules(detail);
+      renderLocalTriggerStatus(detail, syncResult);
     }
 
     function renderDetail(detail) {
@@ -1358,6 +1457,7 @@
       }
 
       syncAutomationControls(detail);
+      syncLocalTriggerControls(detail);
     }
 
     async function loadExternalDevices(force = false) {
@@ -1579,6 +1679,14 @@
       el.addEventListener('change', () => { window.isAutomationEditing = true; });
     });
 
+    window.isLocalRuleEditing = false;
+    document.getElementById('local-trigger-rules').addEventListener('focusin', () => {
+      window.isLocalRuleEditing = true;
+    });
+    document.getElementById('local-trigger-rules').addEventListener('change', () => {
+      window.isLocalRuleEditing = true;
+    });
+
     document.getElementById('auto-target').addEventListener('change', updateAutomationFieldVisibility);
     document.getElementById('auto-device').addEventListener('change', () => {
       refreshAutomationConfig(document.getElementById('auto-device').value, document.getElementById('auto-action').value, document.getElementById('auto-state').value);
@@ -1603,7 +1711,7 @@
         automation_device_id: document.getElementById('auto-device').value,
         automation_action: document.getElementById('auto-action').value,
         automation_state: document.getElementById('auto-state').value,
-        automation_gpio_pin: Number(document.getElementById('auto-gpio-pin').value || 4),
+        automation_gpio_pin: Number(document.getElementById('auto-gpio-pin').value || 15),
         automation_gpio_level: document.getElementById('auto-gpio-level').value,
         automation_gpio_duration_ms: Number(document.getElementById('auto-gpio-duration-ms').value || 1000),
         automation_gpio_repeat_count: Number(document.getElementById('auto-gpio-repeat-count').value || 1),
@@ -1653,6 +1761,45 @@
     document.getElementById('save-automation').addEventListener('click', () => saveAutomation(true));
     document.getElementById('auto-test').addEventListener('click', () => testAutomation());
     document.getElementById('refresh-external-devices').addEventListener('click', () => loadExternalDevices(true));
+
+    function collectLocalTriggerRules() {
+      return Array.from(document.querySelectorAll('.local-trigger-rule-row')).map((row) => ({
+        trigger_pin: Number(row.dataset.triggerPin),
+        enabled: row.querySelector('.local-rule-enabled').checked,
+        output_pin: Number(row.querySelector('.local-rule-output').value || 6),
+        output_level: row.querySelector('.local-rule-level').value,
+        hold_ms: Number(row.querySelector('.local-rule-hold').value || 1000)
+      }));
+    }
+
+    async function saveLocalTriggerRules() {
+      const feedback = document.getElementById('save-local-rules-feedback');
+      try {
+        const result = await apiPost('/api/devices/local-gpio-rules', {
+          sensor_id: sensorId,
+          rules: collectLocalTriggerRules()
+        });
+        window.isLocalRuleEditing = false;
+        if (currentDetail) {
+          currentDetail.sensor.device_local_gpio_rules = result.rules || [];
+          syncLocalTriggerControls(currentDetail, result.sync || null);
+        }
+        if (result.sync && result.sync.ok) {
+          feedback.textContent = 'Regras locais salvas e sincronizadas no ESP.';
+          feedback.style.color = 'var(--green)';
+        } else {
+          feedback.textContent = 'Regras salvas no backend. O ESP nao confirmou a sincronizacao agora.';
+          feedback.style.color = 'var(--orange)';
+        }
+        await loadDetail(currentRange);
+      } catch (error) {
+        feedback.textContent = 'Falha ao salvar gatilhos locais.';
+        feedback.style.color = 'var(--danger)';
+      }
+      setTimeout(() => feedback.textContent = '', 4000);
+    }
+
+    document.getElementById('save-local-rules').addEventListener('click', saveLocalTriggerRules);
 
     document.getElementById('save-schedule').addEventListener('click', async () => {
       const fb = document.getElementById('save-sch-feedback');
