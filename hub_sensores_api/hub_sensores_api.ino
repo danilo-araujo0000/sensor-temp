@@ -1,14 +1,43 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <Preferences.h>
 #include "esp_task_wdt.h"
 #include "config.local.h"
 
+#ifndef DEVICE_API_TOKEN
+#define DEVICE_API_TOKEN ""
+#endif
+
+#ifndef BACKEND_TLS_INSECURE
+#define BACKEND_TLS_INSECURE 1
+#endif
+
+#ifndef BACKEND_CA_CERT
+#define BACKEND_CA_CERT ""
+#endif
+
+#ifndef DEVICE_POLL_INTERVAL_MS
+#define DEVICE_POLL_INTERVAL_MS 1500
+#endif
+
+#ifndef DEVICE_POLL_WAIT_SECONDS
+#define DEVICE_POLL_WAIT_SECONDS 0
+#endif
+
+#ifndef DEVICE_HTTP_TIMEOUT_MS
+#define DEVICE_HTTP_TIMEOUT_MS 3000
+#endif
+
 constexpr char SENSOR_REGISTER_ROUTE[] = "/sensors/register";
 constexpr char MOVEMENT_ROUTE[] = "/movements";
 constexpr char HEARTBEAT_ROUTE[] = "/devices/heartbeat";
 constexpr char HEALTH_ROUTE[] = "/health";
+constexpr char DEVICE_POLL_ROUTE[] = "/api/device/poll";
+constexpr char DEVICE_CONFIG_ROUTE[] = "/api/device/config";
+constexpr char DEVICE_CONFIG_ACK_ROUTE[] = "/api/device/config/ack";
+constexpr char DEVICE_COMMAND_ACK_ROUTE[] = "/api/device/command/ack";
 
 constexpr unsigned long WIFI_RETRY_MS = 10000;
 constexpr unsigned long SENSOR_POLL_MS = 25;
@@ -16,6 +45,7 @@ constexpr unsigned long SENSOR_POLL_MS = 25;
 constexpr unsigned long WIFI_MAX_OFFLINE_MS = 5UL * 60UL * 1000UL;
 constexpr unsigned long HEALTH_CHECK_MS = 60UL * 1000UL;
 constexpr unsigned long DEVICE_HEARTBEAT_MS = 3UL * 1000UL;
+constexpr unsigned long DEVICE_SYNC_FAIL_RETRY_MS = 5000UL;
 constexpr unsigned long LOCAL_GPIO_GAP_MS = 250UL;
 constexpr unsigned long LOCAL_TRIGGER_DEBOUNCE_MS = 60UL;
 constexpr unsigned long LOCAL_TRIGGER_REARM_MS = 250UL;
@@ -32,6 +62,7 @@ constexpr size_t TOTAL_PINOS_GATILHO_LOCAL = sizeof(PINOS_GATILHO_LOCAL) / sizeo
 constexpr size_t TOTAL_PINOS_SAIDA_GATILHO_LOCAL = sizeof(PINOS_SAIDA_GATILHO_LOCAL) / sizeof(PINOS_SAIDA_GATILHO_LOCAL[0]);
 constexpr size_t TOTAL_PINOS_SAIDA_CONTROLADAS = sizeof(PINOS_SAIDA_CONTROLADAS) / sizeof(PINOS_SAIDA_CONTROLADAS[0]);
 constexpr char PREFERENCES_NAMESPACE[] = "hublocal";
+constexpr char PREFERENCES_CONFIG_VERSION_KEY[] = "cfg_ver";
 
 WebServer deviceServer(DEVICE_COMMAND_PORT);
 Preferences preferences;
@@ -85,10 +116,13 @@ constexpr size_t TOTAL_SENSORES = sizeof(sensores) / sizeof(sensores[0]);
 
 unsigned long ultimoWifiRetryMs = 0;
 unsigned long ultimoPollMs = 0;
+unsigned long ultimoDeviceSyncMs = 0;
 unsigned long wifiDesconectadoDesdeMs = 0;
 unsigned long ultimoHealthCheckMs = 0;
 unsigned long ultimoHeartbeatMs = 0;
+unsigned long intervaloPollingBackendMs = DEVICE_POLL_INTERVAL_MS;
 uint8_t falhasHealth = 0;
+uint32_t versaoConfiguracaoAplicada = 0;
 bool sensoresRegistrados = false;
 bool watchdogAtivo = false;
 bool backendDisponivel = false;
@@ -183,6 +217,15 @@ bool pinoEhSensorConfigurado(uint8_t pin) {
 int indiceRegraGatilhoLocal(uint8_t triggerPin) {
   for (size_t i = 0; i < TOTAL_PINOS_GATILHO_LOCAL; i++) {
     if (regrasGatilhoLocal[i].triggerPin == triggerPin) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+int indicePinoGatilhoLocalPermitido(int triggerPin) {
+  for (size_t i = 0; i < TOTAL_PINOS_GATILHO_LOCAL; i++) {
+    if (PINOS_GATILHO_LOCAL[i] == triggerPin) {
       return static_cast<int>(i);
     }
   }
@@ -452,7 +495,126 @@ bool extrairCampoJsonBool(const String& payload, const char* chave, bool valorPa
   return valorPadrao;
 }
 
-bool regraGatilhoLocalValida(const RegraGatilhoLocal& regra, int indiceIgnorado = -1) {
+String extrairArrayJson(const String& payload, const char* chave) {
+  String marcador = "\"" + String(chave) + "\"";
+  int inicioChave = payload.indexOf(marcador);
+  if (inicioChave < 0) {
+    return "";
+  }
+
+  int inicioValor = payload.indexOf(':', inicioChave);
+  if (inicioValor < 0) {
+    return "";
+  }
+
+  int inicioArray = payload.indexOf('[', inicioValor);
+  if (inicioArray < 0) {
+    return "";
+  }
+
+  bool emString = false;
+  bool escape = false;
+  int profundidade = 0;
+  for (int i = inicioArray; i < payload.length(); i++) {
+    char caractere = payload[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (emString && caractere == '\\') {
+      escape = true;
+      continue;
+    }
+    if (caractere == '"') {
+      emString = !emString;
+      continue;
+    }
+    if (emString) {
+      continue;
+    }
+    if (caractere == '[') {
+      profundidade++;
+      continue;
+    }
+    if (caractere == ']') {
+      profundidade--;
+      if (profundidade == 0) {
+        return payload.substring(inicioArray + 1, i);
+      }
+    }
+  }
+
+  return "";
+}
+
+bool proximoObjetoJson(const String& payload, int& cursor, String& objeto) {
+  objeto = "";
+  bool emString = false;
+  bool escape = false;
+  int inicioObjeto = -1;
+  int profundidade = 0;
+
+  for (int i = cursor; i < payload.length(); i++) {
+    char caractere = payload[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (emString && caractere == '\\') {
+      escape = true;
+      continue;
+    }
+    if (caractere == '"') {
+      emString = !emString;
+      continue;
+    }
+    if (emString) {
+      continue;
+    }
+    if (caractere == '{') {
+      if (inicioObjeto < 0) {
+        inicioObjeto = i;
+      }
+      profundidade++;
+      continue;
+    }
+    if (caractere == '}') {
+      if (inicioObjeto < 0) {
+        continue;
+      }
+      profundidade--;
+      if (profundidade == 0) {
+        objeto = payload.substring(inicioObjeto, i + 1);
+        cursor = i + 1;
+        return true;
+      }
+    }
+  }
+
+  cursor = payload.length();
+  return false;
+}
+
+void preencherRegraGatilhoLocalPadrao(RegraGatilhoLocal& regra, size_t indice) {
+  regra.enabled = false;
+  regra.triggerPin = PINOS_GATILHO_LOCAL[indice];
+  regra.outputPin = PINOS_SAIDA_GATILHO_LOCAL[0];
+  regra.outputActiveHigh = true;
+  regra.holdMs = 1000;
+  regra.repeatCount = 1;
+  regra.repeatGapMs = LOCAL_GPIO_GAP_MS;
+  regra.rawInputActive = false;
+  regra.lastInputActive = false;
+  regra.armed = false;
+  regra.rawChangedAtMs = 0;
+  regra.releaseSinceMs = 0;
+}
+
+bool regraGatilhoLocalValidaNoConjunto(
+  const RegraGatilhoLocal& regra,
+  const RegraGatilhoLocal* conjunto,
+  int indiceIgnorado = -1
+) {
   if (!pinoGatilhoLocalPermitido(regra.triggerPin) || !pinoSaidaGatilhoLocalPermitido(regra.outputPin)) {
     return false;
   }
@@ -462,8 +624,8 @@ bool regraGatilhoLocalValida(const RegraGatilhoLocal& regra, int indiceIgnorado 
 
   for (size_t i = 0; i < TOTAL_PINOS_GATILHO_LOCAL; i++) {
     if (static_cast<int>(i) == indiceIgnorado) continue;
-    if (!regrasGatilhoLocal[i].enabled) continue;
-    if (regrasGatilhoLocal[i].triggerPin == regra.outputPin || regrasGatilhoLocal[i].outputPin == regra.outputPin) {
+    if (!conjunto[i].enabled) continue;
+    if (conjunto[i].triggerPin == regra.outputPin || conjunto[i].outputPin == regra.outputPin) {
       return false;
     }
   }
@@ -471,20 +633,13 @@ bool regraGatilhoLocalValida(const RegraGatilhoLocal& regra, int indiceIgnorado 
   return true;
 }
 
+bool regraGatilhoLocalValida(const RegraGatilhoLocal& regra, int indiceIgnorado = -1) {
+  return regraGatilhoLocalValidaNoConjunto(regra, regrasGatilhoLocal, indiceIgnorado);
+}
+
 void inicializarRegrasGatilhoLocal() {
   for (size_t i = 0; i < TOTAL_PINOS_GATILHO_LOCAL; i++) {
-    regrasGatilhoLocal[i].enabled = false;
-    regrasGatilhoLocal[i].triggerPin = PINOS_GATILHO_LOCAL[i];
-    regrasGatilhoLocal[i].outputPin = PINOS_SAIDA_GATILHO_LOCAL[0];
-    regrasGatilhoLocal[i].outputActiveHigh = true;
-    regrasGatilhoLocal[i].holdMs = 1000;
-    regrasGatilhoLocal[i].repeatCount = 1;
-    regrasGatilhoLocal[i].repeatGapMs = LOCAL_GPIO_GAP_MS;
-    regrasGatilhoLocal[i].rawInputActive = false;
-    regrasGatilhoLocal[i].lastInputActive = false;
-    regrasGatilhoLocal[i].armed = false;
-    regrasGatilhoLocal[i].rawChangedAtMs = 0;
-    regrasGatilhoLocal[i].releaseSinceMs = 0;
+    preencherRegraGatilhoLocalPadrao(regrasGatilhoLocal[i], i);
   }
 
   for (size_t i = 0; i < TOTAL_PINOS_SAIDA_CONTROLADAS; i++) {
@@ -724,6 +879,63 @@ void configurarGpioLocalInativo(uint8_t pin, bool ativoEmHigh) {
   digitalWrite(pin, ativoEmHigh ? LOW : HIGH);
 }
 
+bool agendarPulsoLocalValidado(
+  int pin,
+  int durationMs,
+  int repeatCount,
+  int repeatGapMs,
+  String activeLevel,
+  String& erro
+) {
+  erro = "";
+  activeLevel.toUpperCase();
+
+  if (!pinoGpioAutomacaoSensorPermitido(pin)) {
+    erro = "invalid_pin";
+    return false;
+  }
+  if (pinoEhSensorConfigurado(static_cast<uint8_t>(pin))) {
+    erro = "pin_in_use_by_sensor";
+    return false;
+  }
+  if (activeLevel != "HIGH" && activeLevel != "LOW") {
+    erro = "invalid_active_level";
+    return false;
+  }
+
+  if (durationMs < 50) durationMs = 50;
+  if (durationMs > 600000) durationMs = 600000;
+  if (repeatCount < 1) repeatCount = 1;
+  if (repeatCount > 20) repeatCount = 20;
+  if (repeatGapMs < 0) repeatGapMs = 0;
+  if (repeatGapMs > 600000) repeatGapMs = 600000;
+
+  bool ativoEmHigh = activeLevel == "HIGH";
+  if (!agendarSaidaLocal(
+    static_cast<uint8_t>(pin),
+    ativoEmHigh,
+    static_cast<unsigned long>(durationMs),
+    static_cast<uint8_t>(repeatCount),
+    static_cast<unsigned long>(repeatGapMs)
+  )) {
+    erro = "pin_schedule_failed";
+    return false;
+  }
+
+  Serial.print("GPIO local acionado no pino ");
+  Serial.print(pin);
+  Serial.print(" nivel=");
+  Serial.print(activeLevel);
+  Serial.print(" duracaoMs=");
+  Serial.print(durationMs);
+  Serial.print(" repeticoes=");
+  Serial.print(repeatCount);
+  Serial.print(" intervalo=");
+  Serial.print(repeatGapMs);
+  Serial.println(" ms");
+  return true;
+}
+
 void processarPulsoGpioLocal() {
   if (deviceServer.method() != HTTP_POST) {
     responderJsonLocal(405, "{\"ok\":false,\"error\":\"method_not_allowed\"}");
@@ -736,45 +948,10 @@ void processarPulsoGpioLocal() {
   int repeatCount = extrairCampoJsonInt(payload, "repeat_count", 1);
   int repeatGapMs = extrairCampoJsonInt(payload, "repeat_gap_ms", LOCAL_GPIO_GAP_MS);
   String activeLevel = extrairCampoJsonString(payload, "active_level");
-  activeLevel.toUpperCase();
-
-  if (!pinoGpioAutomacaoSensorPermitido(pin)) {
-    responderJsonLocal(400, "{\"ok\":false,\"error\":\"invalid_pin\"}");
-    return;
-  }
-
-  if (pinoEhSensorConfigurado(static_cast<uint8_t>(pin))) {
-    responderJsonLocal(409, "{\"ok\":false,\"error\":\"pin_in_use_by_sensor\"}");
-    return;
-  }
-
-  if (activeLevel != "HIGH" && activeLevel != "LOW") {
-    responderJsonLocal(400, "{\"ok\":false,\"error\":\"invalid_active_level\"}");
-    return;
-  }
-
-  if (durationMs < 50) durationMs = 50;
-  if (durationMs > 600000) durationMs = 600000;
-  if (repeatCount < 1) repeatCount = 1;
-  if (repeatCount > 20) repeatCount = 20;
-  if (repeatGapMs < 0) repeatGapMs = 0;
-  if (repeatGapMs > 600000) repeatGapMs = 600000;
-
-  bool ativoEmHigh = activeLevel == "HIGH";
-  Serial.print("GPIO local acionado no pino ");
-  Serial.print(pin);
-  Serial.print(" nivel=");
-  Serial.print(activeLevel);
-  Serial.print(" duracaoMs=");
-  Serial.print(durationMs);
-  Serial.print(" repeticoes=");
-  Serial.print(repeatCount);
-  Serial.print(" intervalo=");
-  Serial.print(repeatGapMs);
-  Serial.println(" ms");
-
-  if (!agendarSaidaLocal(static_cast<uint8_t>(pin), ativoEmHigh, static_cast<unsigned long>(durationMs), static_cast<uint8_t>(repeatCount), static_cast<unsigned long>(repeatGapMs))) {
-    responderJsonLocal(409, "{\"ok\":false,\"error\":\"pin_schedule_failed\"}");
+  String erro;
+  if (!agendarPulsoLocalValidado(pin, durationMs, repeatCount, repeatGapMs, activeLevel, erro)) {
+    int statusCode = erro == "invalid_pin" || erro == "invalid_active_level" ? 400 : 409;
+    responderJsonLocal(statusCode, "{\"ok\":false,\"error\":\"" + erro + "\"}");
     return;
   }
 
@@ -891,28 +1068,105 @@ bool sensorEstaAtivo(const SensorConfig& sensor) {
   return principalAtivo || secundarioAtivo;
 }
 
-bool postJson(const char* url, const String& payload, int& httpCode, String& resposta) {
+void adicionarCabecalhosBackend(HTTPClient& http, bool enviarJson) {
+  http.addHeader("Accept", "application/json");
+  if (enviarJson) {
+    http.addHeader("Content-Type", "application/json");
+  }
+  if (strlen(DEVICE_API_TOKEN) > 0) {
+    http.addHeader("Authorization", "Bearer " + String(DEVICE_API_TOKEN));
+  }
+}
+
+bool backendRequest(const char* method, const String& url, const String& payload, int& httpCode, String& resposta) {
   if (WiFi.status() != WL_CONNECTED) {
     return false;
   }
 
+  httpCode = 0;
+  resposta = "";
+  bool usarTls = url.startsWith("https://");
+
+  if (usarTls) {
+    WiFiClientSecure client;
+    if (strlen(BACKEND_CA_CERT) > 0) {
+      client.setCACert(BACKEND_CA_CERT);
+    } else if (BACKEND_TLS_INSECURE) {
+      client.setInsecure();
+    } else {
+      Serial.println("TLS sem BACKEND_CA_CERT e sem BACKEND_TLS_INSECURE.");
+      return false;
+    }
+
+    HTTPClient http;
+    if (!http.begin(client, url)) {
+      Serial.print("Falha ao iniciar HTTPS em ");
+      Serial.println(url);
+      return false;
+    }
+    http.setConnectTimeout(DEVICE_HTTP_TIMEOUT_MS);
+    http.setTimeout(DEVICE_HTTP_TIMEOUT_MS);
+    adicionarCabecalhosBackend(http, String(method) != "GET");
+    httpCode = String(method) == "GET" ? http.GET() : http.POST(payload);
+    resposta = http.getString();
+    http.end();
+    return true;
+  }
+
+  WiFiClient client;
   HTTPClient http;
-  if (!http.begin(url)) {
-    Serial.print("Falha ao iniciar HTTPClient em ");
+  if (!http.begin(client, url)) {
+    Serial.print("Falha ao iniciar HTTP em ");
     Serial.println(url);
     return false;
   }
-
-  http.setTimeout(3000);
-  http.addHeader("Content-Type", "application/json");
-  httpCode = http.POST(payload);
+  http.setConnectTimeout(DEVICE_HTTP_TIMEOUT_MS);
+  http.setTimeout(DEVICE_HTTP_TIMEOUT_MS);
+  adicionarCabecalhosBackend(http, String(method) != "GET");
+  httpCode = String(method) == "GET" ? http.GET() : http.POST(payload);
   resposta = http.getString();
   http.end();
   return true;
 }
 
+bool postJson(const String& url, const String& payload, int& httpCode, String& resposta) {
+  return backendRequest("POST", url, payload, httpCode, resposta);
+}
+
+bool getJson(const String& url, int& httpCode, String& resposta) {
+  return backendRequest("GET", url, "", httpCode, resposta);
+}
+
 String montarUrl(const char* rota) {
   return String(url_default) + rota;
+}
+
+String montarUrlComQuery(const char* rota, const String& query) {
+  String url = montarUrl(rota);
+  if (query.length() > 0) {
+    url += "?";
+    url += query;
+  }
+  return url;
+}
+
+void atualizarIntervaloPollingBackend(unsigned long sugeridoMs) {
+  if (sugeridoMs < 250UL) sugeridoMs = 250UL;
+  if (sugeridoMs > 30000UL) sugeridoMs = 30000UL;
+  intervaloPollingBackendMs = sugeridoMs;
+}
+
+void carregarVersaoConfiguracaoAplicada() {
+  if (!preferencesAtivas) {
+    versaoConfiguracaoAplicada = 0;
+    return;
+  }
+  versaoConfiguracaoAplicada = preferences.getUInt(PREFERENCES_CONFIG_VERSION_KEY, 0);
+}
+
+void salvarVersaoConfiguracaoAplicada() {
+  if (!preferencesAtivas) return;
+  preferences.putUInt(PREFERENCES_CONFIG_VERSION_KEY, versaoConfiguracaoAplicada);
 }
 
 bool verificarHealthBackend() {
@@ -922,15 +1176,12 @@ bool verificarHealthBackend() {
     return false;
   }
 
-  HTTPClient http;
-  if (!http.begin(montarUrl(HEALTH_ROUTE))) {
+  int httpCode = 0;
+  String resposta;
+  if (!getJson(montarUrl(HEALTH_ROUTE), httpCode, resposta)) {
+    backendDisponivel = false;
     return false;
   }
-
-  http.setTimeout(3000);
-  int httpCode = http.GET();
-  String resposta = http.getString();
-  http.end();
 
   Serial.print("GET health -> HTTP ");
   Serial.println(httpCode);
@@ -962,7 +1213,7 @@ bool registrarSensoresNoBackend() {
   int httpCode = 0;
   String resposta;
   registroBackendTentado = true;
-  if (!postJson(montarUrl(SENSOR_REGISTER_ROUTE).c_str(), payload, httpCode, resposta)) {
+  if (!postJson(montarUrl(SENSOR_REGISTER_ROUTE), payload, httpCode, resposta)) {
     backendDisponivel = false;
     sensoresRegistrados = false;
     return false;
@@ -976,6 +1227,9 @@ bool registrarSensoresNoBackend() {
 
   sensoresRegistrados = httpCode >= 200 && httpCode < 300;
   backendDisponivel = sensoresRegistrados;
+  if (sensoresRegistrados) {
+    ultimoDeviceSyncMs = 0;
+  }
   return sensoresRegistrados;
 }
 
@@ -1003,6 +1257,8 @@ void conectarWifi() {
     sensoresRegistrados = false;
     backendDisponivel = false;
     registroBackendTentado = false;
+    ultimoDeviceSyncMs = 0;
+    atualizarIntervaloPollingBackend(DEVICE_POLL_INTERVAL_MS);
     registrarSensoresNoBackend();
   } else {
     Serial.println("Falha ao conectar no WiFi.");
@@ -1020,7 +1276,7 @@ bool enviarEvento(const SensorConfig& sensor) {
   String payload = "{\"sensor_id\":\"" + montarSensorId(sensor) + "\"}";
   int httpCode = 0;
   String resposta;
-  if (!postJson(montarUrl(MOVEMENT_ROUTE).c_str(), payload, httpCode, resposta)) {
+  if (!postJson(montarUrl(MOVEMENT_ROUTE), payload, httpCode, resposta)) {
     return false;
   }
 
@@ -1041,14 +1297,246 @@ bool enviarHeartbeatDispositivo() {
     return false;
   }
 
-  String payload = "{\"device_id\":\"" + String(DEVICE_ID) + "\",\"command_port\":" + String(DEVICE_COMMAND_PORT) + "}";
+  String payload = "{\"device_id\":\"" + String(DEVICE_ID) + "\",\"command_port\":" + String(DEVICE_COMMAND_PORT) + ",\"config_version\":" + String(versaoConfiguracaoAplicada) + "}";
   int httpCode = 0;
   String resposta;
-  if (!postJson(montarUrl(HEARTBEAT_ROUTE).c_str(), payload, httpCode, resposta)) {
+  if (!postJson(montarUrl(HEARTBEAT_ROUTE), payload, httpCode, resposta)) {
     return false;
   }
 
+  backendDisponivel = httpCode >= 200 && httpCode < 300;
+  return backendDisponivel;
+}
+
+bool enviarAckConfiguracao(uint32_t configVersion, const char* status, const String& message) {
+  String payload = "{";
+  payload += "\"device_id\":\"" + String(DEVICE_ID) + "\",";
+  payload += "\"config_version\":" + String(configVersion) + ",";
+  payload += "\"status\":\"" + String(status) + "\"";
+  if (message.length() > 0) {
+    payload += ",\"message\":\"" + message + "\"";
+  }
+  payload += "}";
+
+  int httpCode = 0;
+  String resposta;
+  if (!postJson(montarUrl(DEVICE_CONFIG_ACK_ROUTE), payload, httpCode, resposta)) {
+    return false;
+  }
   return httpCode >= 200 && httpCode < 300;
+}
+
+bool enviarAckComando(const String& commandId, const char* status, const String& message) {
+  if (commandId.length() == 0) {
+    return false;
+  }
+
+  String payload = "{";
+  payload += "\"device_id\":\"" + String(DEVICE_ID) + "\",";
+  payload += "\"command_id\":\"" + commandId + "\",";
+  payload += "\"status\":\"" + String(status) + "\"";
+  if (message.length() > 0) {
+    payload += ",\"message\":\"" + message + "\"";
+  }
+  payload += "}";
+
+  int httpCode = 0;
+  String resposta;
+  if (!postJson(montarUrl(DEVICE_COMMAND_ACK_ROUTE), payload, httpCode, resposta)) {
+    return false;
+  }
+  return httpCode >= 200 && httpCode < 300;
+}
+
+bool aplicarConfiguracaoRemotaLocal(const String& resposta, uint32_t configVersion, String& erro) {
+  erro = "";
+  if (resposta.indexOf("\"local_trigger_rules\"") < 0) {
+    erro = "local_trigger_rules_missing";
+    return false;
+  }
+
+  String regrasArray = extrairArrayJson(resposta, "local_trigger_rules");
+  RegraGatilhoLocal novasRegras[TOTAL_PINOS_GATILHO_LOCAL];
+  for (size_t i = 0; i < TOTAL_PINOS_GATILHO_LOCAL; i++) {
+    preencherRegraGatilhoLocalPadrao(novasRegras[i], i);
+  }
+
+  int cursor = 0;
+  String regraJson;
+  while (proximoObjetoJson(regrasArray, cursor, regraJson)) {
+    int triggerPin = extrairCampoJsonInt(regraJson, "trigger_pin", -1);
+    int indice = indicePinoGatilhoLocalPermitido(triggerPin);
+    if (indice < 0) {
+      erro = "invalid_trigger_pin";
+      return false;
+    }
+
+    RegraGatilhoLocal candidata = novasRegras[indice];
+    candidata.enabled = extrairCampoJsonBool(regraJson, "enabled", false);
+    candidata.outputPin = static_cast<uint8_t>(extrairCampoJsonInt(regraJson, "output_pin", candidata.outputPin));
+    candidata.holdMs = static_cast<unsigned long>(extrairCampoJsonInt(regraJson, "hold_ms", static_cast<int>(candidata.holdMs)));
+    candidata.repeatCount = static_cast<uint8_t>(extrairCampoJsonInt(regraJson, "repeat_count", static_cast<int>(candidata.repeatCount)));
+    candidata.repeatGapMs = static_cast<unsigned long>(extrairCampoJsonInt(regraJson, "repeat_gap_ms", static_cast<int>(candidata.repeatGapMs)));
+    String outputLevel = extrairCampoJsonString(regraJson, "output_level");
+    outputLevel.toUpperCase();
+
+    if (!pinoSaidaGatilhoLocalPermitido(candidata.outputPin)) {
+      erro = "invalid_output_pin";
+      return false;
+    }
+    if (outputLevel != "HIGH" && outputLevel != "LOW") {
+      erro = "invalid_output_level";
+      return false;
+    }
+    if (candidata.holdMs < 50UL) candidata.holdMs = 50UL;
+    if (candidata.holdMs > 600000UL) candidata.holdMs = 600000UL;
+    if (candidata.repeatCount < 1) candidata.repeatCount = 1;
+    if (candidata.repeatCount > 20) candidata.repeatCount = 20;
+    if (candidata.repeatGapMs > 600000UL) candidata.repeatGapMs = 600000UL;
+    candidata.outputActiveHigh = outputLevel == "HIGH";
+    candidata.rawInputActive = false;
+    candidata.lastInputActive = false;
+    candidata.armed = false;
+    candidata.rawChangedAtMs = 0;
+    candidata.releaseSinceMs = 0;
+
+    if (candidata.enabled && !regraGatilhoLocalValidaNoConjunto(candidata, novasRegras, indice)) {
+      erro = "rule_pin_conflict";
+      return false;
+    }
+
+    novasRegras[indice] = candidata;
+  }
+
+  for (size_t i = 0; i < TOTAL_PINOS_GATILHO_LOCAL; i++) {
+    regrasGatilhoLocal[i] = novasRegras[i];
+  }
+  salvarRegrasGatilhoLocal();
+  aplicarConfiguracaoRegrasGatilhoLocal();
+  versaoConfiguracaoAplicada = configVersion;
+  salvarVersaoConfiguracaoAplicada();
+  return true;
+}
+
+bool baixarEAplicarConfiguracaoRemota(uint32_t versaoEsperada) {
+  int httpCode = 0;
+  String resposta;
+  String url = montarUrlComQuery(DEVICE_CONFIG_ROUTE, "device_id=" + String(DEVICE_ID));
+  if (!getJson(url, httpCode, resposta)) {
+    return false;
+  }
+
+  Serial.print("GET config -> HTTP ");
+  Serial.println(httpCode);
+  if (resposta.length()) {
+    Serial.println(resposta);
+  }
+  if (httpCode < 200 || httpCode >= 300) {
+    return false;
+  }
+
+  uint32_t configVersion = static_cast<uint32_t>(extrairCampoJsonInt(resposta, "config_version", static_cast<int>(versaoEsperada)));
+  if (configVersion < versaoEsperada) {
+    configVersion = versaoEsperada;
+  }
+  atualizarIntervaloPollingBackend(static_cast<unsigned long>(extrairCampoJsonInt(resposta, "poll_after_ms", static_cast<int>(intervaloPollingBackendMs))));
+
+  String erro;
+  if (!aplicarConfiguracaoRemotaLocal(resposta, configVersion, erro)) {
+    enviarAckConfiguracao(configVersion, "error", erro);
+    return false;
+  }
+
+  enviarAckConfiguracao(configVersion, "applied", "");
+  return true;
+}
+
+bool executarComandoRemoto(const String& comandoJson) {
+  String commandId = extrairCampoJsonString(comandoJson, "id");
+  String tipo = extrairCampoJsonString(comandoJson, "type");
+  tipo.toLowerCase();
+  if (commandId.length() == 0) {
+    return false;
+  }
+
+  if (tipo == "gpio_pulse") {
+    int pin = extrairCampoJsonInt(comandoJson, "pin", -1);
+    int durationMs = extrairCampoJsonInt(comandoJson, "duration_ms", 1000);
+    int repeatCount = extrairCampoJsonInt(comandoJson, "repeat_count", 1);
+    int repeatGapMs = extrairCampoJsonInt(comandoJson, "repeat_gap_ms", LOCAL_GPIO_GAP_MS);
+    String activeLevel = extrairCampoJsonString(comandoJson, "active_level");
+    String erro;
+    if (!agendarPulsoLocalValidado(pin, durationMs, repeatCount, repeatGapMs, activeLevel, erro)) {
+      enviarAckComando(commandId, "error", erro);
+      return false;
+    }
+    enviarAckComando(commandId, "accepted", "");
+    return true;
+  }
+
+  if (tipo == "refresh_config") {
+    bool ok = baixarEAplicarConfiguracaoRemota(versaoConfiguracaoAplicada);
+    enviarAckComando(commandId, ok ? "done" : "error", ok ? "" : "config_refresh_failed");
+    return ok;
+  }
+
+  enviarAckComando(commandId, "ignored", "unsupported_command");
+  return true;
+}
+
+bool processarRespostaPolling(const String& resposta) {
+  atualizarIntervaloPollingBackend(static_cast<unsigned long>(extrairCampoJsonInt(resposta, "poll_after_ms", static_cast<int>(intervaloPollingBackendMs))));
+  uint32_t configVersionDesejada = static_cast<uint32_t>(extrairCampoJsonInt(resposta, "config_version", static_cast<int>(versaoConfiguracaoAplicada)));
+  bool configChanged = extrairCampoJsonBool(resposta, "config_changed", false) || configVersionDesejada > versaoConfiguracaoAplicada;
+  bool tudoOk = true;
+
+  if (configChanged && !baixarEAplicarConfiguracaoRemota(configVersionDesejada)) {
+    tudoOk = false;
+  }
+
+  String comandosArray = extrairArrayJson(resposta, "commands");
+  int cursor = 0;
+  String comandoJson;
+  while (proximoObjetoJson(comandosArray, cursor, comandoJson)) {
+    if (!executarComandoRemoto(comandoJson)) {
+      tudoOk = false;
+    }
+  }
+
+  return tudoOk;
+}
+
+bool sincronizarBackendDispositivo() {
+  if (WiFi.status() != WL_CONNECTED || !sensoresRegistrados) {
+    return false;
+  }
+
+  String query = "device_id=" + String(DEVICE_ID);
+  query += "&config_version=" + String(versaoConfiguracaoAplicada);
+  query += "&wait_seconds=" + String(DEVICE_POLL_WAIT_SECONDS);
+  query += "&limit=5";
+
+  int httpCode = 0;
+  String resposta;
+  if (!getJson(montarUrlComQuery(DEVICE_POLL_ROUTE, query), httpCode, resposta)) {
+    backendDisponivel = false;
+    return false;
+  }
+
+  bool configChanged = extrairCampoJsonBool(resposta, "config_changed", false);
+  bool temComandos = extrairArrayJson(resposta, "commands").length() > 0;
+  if (httpCode < 200 || httpCode >= 300 || configChanged || temComandos) {
+    Serial.print("GET poll -> HTTP ");
+    Serial.println(httpCode);
+    Serial.println(resposta);
+  }
+
+  backendDisponivel = httpCode >= 200 && httpCode < 300;
+  if (!backendDisponivel) {
+    return false;
+  }
+
+  return processarRespostaPolling(resposta);
 }
 
 void configurarPinoSensor(uint8_t pin, TipoLigacao ligacao) {
@@ -1081,6 +1569,7 @@ void setup() {
   Serial.begin(115200);
   setupWatchdog();
   preferencesAtivas = preferences.begin(PREFERENCES_NAMESPACE, false);
+  carregarVersaoConfiguracaoAplicada();
   inicializarRegrasGatilhoLocal();
   carregarRegrasGatilhoLocal();
 
@@ -1097,6 +1586,8 @@ void setup() {
   sincronizarIndicadorLed();
   atualizarIndicadorLed();
 
+  Serial.print("Config version aplicada: ");
+  Serial.println(versaoConfiguracaoAplicada);
   Serial.println("Hub de sensores iniciado.");
 }
 
@@ -1130,6 +1621,13 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED && agora - ultimoHeartbeatMs >= DEVICE_HEARTBEAT_MS) {
     ultimoHeartbeatMs = agora;
     enviarHeartbeatDispositivo();
+  }
+
+  if (WiFi.status() == WL_CONNECTED && sensoresRegistrados && agora - ultimoDeviceSyncMs >= intervaloPollingBackendMs) {
+    ultimoDeviceSyncMs = agora;
+    if (!sincronizarBackendDispositivo()) {
+      atualizarIntervaloPollingBackend(DEVICE_SYNC_FAIL_RETRY_MS);
+    }
   }
 
   if (WiFi.status() == WL_CONNECTED && agora - ultimoHealthCheckMs >= HEALTH_CHECK_MS) {

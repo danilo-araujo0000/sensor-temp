@@ -99,6 +99,12 @@ EXTERNAL_API_TIMEOUT_SECONDS = max(env_int("EXTERNAL_API_TIMEOUT_SECONDS", 15), 
 EXTERNAL_API_INSECURE_TLS = env_bool("EXTERNAL_API_INSECURE_TLS", False)
 EXTERNAL_API_DEVICE_CACHE_SECONDS = max(env_int("EXTERNAL_API_DEVICE_CACHE_SECONDS", 300), 30)
 DEVICE_HEARTBEAT_TIMEOUT_SECONDS = max(env_int("DEVICE_HEARTBEAT_TIMEOUT_SECONDS", 10), 3)
+DEVICE_POLL_DEFAULT_MS = max(env_int("DEVICE_POLL_DEFAULT_MS", 1500), 250)
+DEVICE_POLL_MAX_WAIT_SECONDS = max(env_int("DEVICE_POLL_MAX_WAIT_SECONDS", 20), 1)
+DEVICE_COMMAND_BATCH_SIZE = max(env_int("DEVICE_COMMAND_BATCH_SIZE", 5), 1)
+DEVICE_COMMAND_RESEND_SECONDS = max(env_int("DEVICE_COMMAND_RESEND_SECONDS", 30), 5)
+DEVICE_COMMAND_TTL_SECONDS = max(env_int("DEVICE_COMMAND_TTL_SECONDS", 300), 30)
+DEVICE_SHARED_TOKEN = env_value("DEVICE_SHARED_TOKEN", "")
 MODERATOR_API_BASE_URL = env_value("MODERATOR_API_BASE_URL", "").rstrip("/")
 MODERATOR_API_TOKEN = env_value("MODERATOR_API_TOKEN", "")
 MODERATOR_API_TIMEOUT_SECONDS = max(env_int("MODERATOR_API_TIMEOUT_SECONDS", 15), 3)
@@ -267,6 +273,55 @@ def init_db() -> None:
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_device_local_gpio_rules_device_trigger
             ON device_local_gpio_rules(device_id, trigger_pin)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_config_state (
+                device_id TEXT PRIMARY KEY,
+                desired_config_version INTEGER NOT NULL DEFAULT 1,
+                applied_config_version INTEGER NOT NULL DEFAULT 0,
+                last_config_ack_at TEXT,
+                last_config_status TEXT,
+                last_config_message TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        ensure_column(conn, "device_config_state", "desired_config_version", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "device_config_state", "applied_config_version", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "device_config_state", "last_config_ack_at", "TEXT")
+        ensure_column(conn, "device_config_state", "last_config_status", "TEXT")
+        ensure_column(conn, "device_config_state", "last_config_message", "TEXT")
+        ensure_column(conn, "device_config_state", "updated_at", "TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_commands (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL,
+                command_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                available_at_epoch INTEGER NOT NULL,
+                expires_at_epoch INTEGER,
+                delivered_at_epoch INTEGER,
+                delivered_attempts INTEGER NOT NULL DEFAULT 0,
+                acked_at TEXT,
+                last_error TEXT
+            )
+            """
+        )
+        ensure_column(conn, "device_commands", "available_at_epoch", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "device_commands", "expires_at_epoch", "INTEGER")
+        ensure_column(conn, "device_commands", "delivered_at_epoch", "INTEGER")
+        ensure_column(conn, "device_commands", "delivered_attempts", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "device_commands", "acked_at", "TEXT")
+        ensure_column(conn, "device_commands", "last_error", "TEXT")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_device_commands_device_status
+            ON device_commands(device_id, status, available_at_epoch)
             """
         )
         conn.commit()
@@ -520,14 +575,27 @@ def is_device_online(sensor: sqlite3.Row | dict, now_epoch: int | None = None) -
     return reference_epoch - int(last_seen_epoch) <= DEVICE_HEARTBEAT_TIMEOUT_SECONDS
 
 
-def mark_device_heartbeat(device_id: str, remote_ip: str = "", command_port: int | None = None) -> dict:
+def mark_device_heartbeat(
+    device_id: str,
+    remote_ip: str = "",
+    command_port: int | None = None,
+    config_version: int | None = None,
+) -> dict:
     normalized = device_id.strip()
     if not normalized:
         raise ValueError("device_id_required")
+    ensure_device_config_state(normalized)
 
     now = app_now()
     now_iso = now.isoformat()
     now_epoch = int(now.timestamp())
+
+    normalized_config_version = None
+    if config_version is not None:
+        try:
+            normalized_config_version = max(0, int(config_version))
+        except (TypeError, ValueError):
+            normalized_config_version = None
 
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.execute(
@@ -542,6 +610,19 @@ def mark_device_heartbeat(device_id: str, remote_ip: str = "", command_port: int
             """,
             (now_iso, now_epoch, remote_ip.strip() or None, command_port, normalized),
         )
+        if normalized_config_version is not None:
+            conn.execute(
+                """
+                UPDATE device_config_state
+                SET applied_config_version = MAX(applied_config_version, ?),
+                    last_config_ack_at = ?,
+                    last_config_status = 'applied',
+                    last_config_message = COALESCE(last_config_message, ''),
+                    updated_at = ?
+                WHERE device_id = ?
+                """,
+                (normalized_config_version, now_iso, now_iso, normalized),
+            )
         conn.commit()
 
     return {
@@ -551,6 +632,7 @@ def mark_device_heartbeat(device_id: str, remote_ip: str = "", command_port: int
         "last_seen_epoch": now_epoch,
         "device_last_seen_ip": remote_ip.strip(),
         "device_command_port": command_port,
+        "config_version": normalized_config_version,
     }
 
 
@@ -648,6 +730,368 @@ def device_exists(device_id: str) -> bool:
             (normalized,),
         ).fetchone()
     return row is not None
+
+
+def ensure_device_config_state(device_id: str) -> dict:
+    normalized = device_id.strip()
+    if not normalized:
+        raise ValueError("device_id_required")
+
+    now_iso = app_now().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO device_config_state (
+                device_id, desired_config_version, applied_config_version, updated_at
+            )
+            VALUES (?, 1, 0, ?)
+            ON CONFLICT(device_id) DO NOTHING
+            """,
+            (normalized, now_iso),
+        )
+        conn.commit()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT device_id, desired_config_version, applied_config_version,
+                   last_config_ack_at, last_config_status, last_config_message, updated_at
+            FROM device_config_state
+            WHERE device_id = ?
+            """,
+            (normalized,),
+        ).fetchone()
+
+    return dict(row) if row else {
+        "device_id": normalized,
+        "desired_config_version": 1,
+        "applied_config_version": 0,
+        "last_config_ack_at": None,
+        "last_config_status": None,
+        "last_config_message": None,
+        "updated_at": now_iso,
+    }
+
+
+def fetch_device_config_state(device_id: str) -> dict | None:
+    normalized = device_id.strip()
+    if not normalized:
+        return None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT device_id, desired_config_version, applied_config_version,
+                   last_config_ack_at, last_config_status, last_config_message, updated_at
+            FROM device_config_state
+            WHERE device_id = ?
+            """,
+            (normalized,),
+        ).fetchone()
+
+    return dict(row) if row else None
+
+
+def bump_device_config_version(device_id: str) -> dict:
+    normalized = device_id.strip()
+    state = ensure_device_config_state(normalized)
+    next_version = max(1, int(state.get("desired_config_version") or 1)) + 1
+    now_iso = app_now().isoformat()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE device_config_state
+            SET desired_config_version = ?,
+                updated_at = ?
+            WHERE device_id = ?
+            """,
+            (next_version, now_iso, normalized),
+        )
+        conn.commit()
+
+    updated = fetch_device_config_state(normalized)
+    return updated if updated is not None else ensure_device_config_state(normalized)
+
+
+def build_device_config_payload(device_id: str) -> dict:
+    normalized = device_id.strip()
+    if not normalized:
+        raise ValueError("device_id_required")
+
+    state = ensure_device_config_state(normalized)
+    return {
+        "ok": True,
+        "device_id": normalized,
+        "config_version": int(state.get("desired_config_version") or 1),
+        "poll_after_ms": DEVICE_POLL_DEFAULT_MS,
+        "local_trigger_rules": fetch_device_local_gpio_rules(normalized),
+    }
+
+
+def queue_device_command(
+    device_id: str,
+    command_type: str,
+    payload: dict,
+    *,
+    available_in_seconds: int = 0,
+    ttl_seconds: int = DEVICE_COMMAND_TTL_SECONDS,
+) -> dict:
+    normalized = device_id.strip()
+    if not normalized:
+        raise ValueError("device_id_required")
+    if not device_exists(normalized):
+        raise ValueError("device_not_found")
+
+    command_id = uuid.uuid4().hex
+    now = app_now()
+    now_iso = now.isoformat()
+    now_epoch = int(now.timestamp())
+    available_at_epoch = now_epoch + max(0, int(available_in_seconds))
+    expires_at_epoch = available_at_epoch + max(1, int(ttl_seconds))
+    serialized_payload = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO device_commands (
+                id, device_id, command_type, payload_json, status, created_at,
+                available_at_epoch, expires_at_epoch, delivered_at_epoch,
+                delivered_attempts, acked_at, last_error
+            )
+            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, NULL, 0, NULL, NULL)
+            """,
+            (
+                command_id,
+                normalized,
+                command_type,
+                serialized_payload,
+                now_iso,
+                available_at_epoch,
+                expires_at_epoch,
+            ),
+        )
+        conn.commit()
+
+    return {
+        "command_id": command_id,
+        "device_id": normalized,
+        "command_type": command_type,
+        "payload": payload,
+        "created_at": now_iso,
+        "available_at_epoch": available_at_epoch,
+        "expires_at_epoch": expires_at_epoch,
+    }
+
+
+def fetch_deliverable_device_commands(device_id: str, limit: int = DEVICE_COMMAND_BATCH_SIZE) -> list[dict]:
+    normalized = device_id.strip()
+    if not normalized:
+        return []
+
+    now_epoch = int(app_now().timestamp())
+    resend_cutoff_epoch = now_epoch - DEVICE_COMMAND_RESEND_SECONDS
+    safe_limit = max(1, min(25, int(limit)))
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, device_id, command_type, payload_json, status, created_at,
+                   available_at_epoch, expires_at_epoch, delivered_at_epoch,
+                   delivered_attempts, acked_at, last_error
+            FROM device_commands
+            WHERE device_id = ?
+              AND status IN ('pending', 'sent')
+              AND available_at_epoch <= ?
+              AND (expires_at_epoch IS NULL OR expires_at_epoch >= ?)
+              AND (status = 'pending' OR delivered_at_epoch IS NULL OR delivered_at_epoch <= ?)
+            ORDER BY available_at_epoch ASC, created_at ASC
+            LIMIT ?
+            """,
+            (normalized, now_epoch, now_epoch, resend_cutoff_epoch, safe_limit),
+        ).fetchall()
+
+    commands: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            payload = json.loads(str(item.get("payload_json") or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        item["payload"] = payload if isinstance(payload, dict) else {}
+        commands.append(item)
+    return commands
+
+
+def mark_device_commands_sent(device_id: str, command_ids: list[str]) -> None:
+    normalized = device_id.strip()
+    ids = [str(item).strip() for item in command_ids if str(item).strip()]
+    if not normalized or not ids:
+        return
+
+    now_epoch = int(app_now().timestamp())
+    placeholders = ",".join("?" for _ in ids)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            f"""
+            UPDATE device_commands
+            SET status = 'sent',
+                delivered_at_epoch = ?,
+                delivered_attempts = COALESCE(delivered_attempts, 0) + 1
+            WHERE device_id = ?
+              AND id IN ({placeholders})
+            """,
+            (now_epoch, normalized, *ids),
+        )
+        conn.commit()
+
+
+def ack_device_command(payload: dict) -> dict:
+    device_id = str(payload.get("device_id", "")).strip()
+    command_id = str(payload.get("command_id", "")).strip()
+    status = str(payload.get("status", "done") or "done").strip().lower()
+    message = str(payload.get("message", "") or "").strip()
+    if not device_id:
+        raise ValueError("device_id_required")
+    if not command_id:
+        raise ValueError("command_id_required")
+    if status not in {"done", "error", "accepted", "ignored"}:
+        raise ValueError("invalid_status")
+
+    resolved_status = "done" if status in {"done", "accepted", "ignored"} else "error"
+    now_iso = app_now().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE device_commands
+            SET status = ?,
+                acked_at = ?,
+                last_error = ?
+            WHERE device_id = ?
+              AND id = ?
+            """,
+            (
+                resolved_status,
+                now_iso,
+                message[:500] if message else None,
+                device_id,
+                command_id,
+            ),
+        )
+        conn.commit()
+
+    if cursor.rowcount <= 0:
+        raise ValueError("command_not_found")
+
+    return {
+        "device_id": device_id,
+        "command_id": command_id,
+        "status": resolved_status,
+        "acked_at": now_iso,
+    }
+
+
+def ack_device_config(payload: dict) -> dict:
+    device_id = str(payload.get("device_id", "")).strip()
+    raw_version = payload.get("config_version")
+    status = str(payload.get("status", "applied") or "applied").strip().lower()
+    message = str(payload.get("message", "") or "").strip()
+    if not device_id:
+        raise ValueError("device_id_required")
+    try:
+        config_version = max(0, int(raw_version))
+    except (TypeError, ValueError):
+        raise ValueError("config_version_required")
+    if status not in {"applied", "error"}:
+        raise ValueError("invalid_status")
+
+    ensure_device_config_state(device_id)
+    now_iso = app_now().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        if status == "applied":
+            conn.execute(
+                """
+                UPDATE device_config_state
+                SET applied_config_version = MAX(applied_config_version, ?),
+                    last_config_ack_at = ?,
+                    last_config_status = ?,
+                    last_config_message = ?,
+                    updated_at = ?
+                WHERE device_id = ?
+                """,
+                (config_version, now_iso, status, message[:500], now_iso, device_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE device_config_state
+                SET last_config_ack_at = ?,
+                    last_config_status = ?,
+                    last_config_message = ?,
+                    updated_at = ?
+                WHERE device_id = ?
+                """,
+                (now_iso, status, message[:500], now_iso, device_id),
+            )
+        conn.commit()
+
+    state = fetch_device_config_state(device_id)
+    return {
+        "device_id": device_id,
+        "config_version": config_version,
+        "status": status,
+        "state": state,
+    }
+
+
+def build_device_poll_payload(
+    device_id: str,
+    current_config_version: int,
+    *,
+    limit: int = DEVICE_COMMAND_BATCH_SIZE,
+) -> dict:
+    normalized = device_id.strip()
+    state = ensure_device_config_state(normalized)
+    desired_version = int(state.get("desired_config_version") or 1)
+    commands = fetch_deliverable_device_commands(normalized, limit)
+    mark_device_commands_sent(normalized, [str(item["id"]) for item in commands])
+
+    serialized_commands: list[dict] = []
+    for command in commands:
+        payload = dict(command.get("payload") or {})
+        serialized_commands.append(
+            {
+                "id": str(command["id"]),
+                "type": str(command["command_type"]),
+                **payload,
+            }
+        )
+
+    return {
+        "ok": True,
+        "device_id": normalized,
+        "config_version": desired_version,
+        "config_changed": desired_version > max(0, int(current_config_version)),
+        "commands": serialized_commands,
+        "poll_after_ms": DEVICE_POLL_DEFAULT_MS,
+    }
+
+
+def device_poll_ready(
+    device_id: str,
+    current_config_version: int,
+    *,
+    limit: int = DEVICE_COMMAND_BATCH_SIZE,
+) -> bool:
+    normalized = device_id.strip()
+    if not normalized:
+        return True
+
+    state = fetch_device_config_state(normalized)
+    desired_version = int(state.get("desired_config_version") or 1)
+    if desired_version > max(0, int(current_config_version)):
+        return True
+    return bool(fetch_deliverable_device_commands(normalized, limit))
 
 
 def default_device_local_gpio_rules(device_id: str) -> list[dict]:
@@ -776,64 +1220,12 @@ def save_device_local_gpio_rules(device_id: str, rules: list[dict]) -> list[dict
 
 
 def push_device_local_gpio_rules(device_id: str, rules: list[dict]) -> dict:
-    runtime = fetch_device_runtime(device_id)
-    if runtime is None:
-        return {"ok": False, "reason": "device_not_found"}
-
-    device_ip = str(runtime.get("device_last_seen_ip") or "").strip()
-    if not device_ip:
-        return {"ok": False, "reason": "device_ip_unknown"}
-
-    raw_port = runtime.get("device_command_port")
-    try:
-        command_port = int(raw_port)
-    except (TypeError, ValueError):
-        command_port = 8088
-    if command_port <= 0:
-        command_port = 8088
-
-    base_url = f"http://{device_ip}:{command_port}"
-
-    try:
-        reset_request = Request(
-            f"{base_url}/local-trigger-rules/reset",
-            data=b"{}",
-            method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        with urlopen(reset_request, timeout=5) as response:
-            response.read()
-
-        for rule in rules:
-            body = json.dumps(
-                {
-                    "trigger_pin": int(rule["trigger_pin"]),
-                    "enabled": bool(rule["enabled"]),
-                    "output_pin": int(rule["output_pin"]),
-                    "output_level": sanitize_gpio_level(rule["output_level"], "HIGH"),
-                    "hold_ms": int(rule["hold_ms"]),
-                    "repeat_count": int(rule["repeat_count"]),
-                    "repeat_gap_ms": int(rule["repeat_gap_ms"]),
-                }
-            ).encode("utf-8")
-            request = Request(
-                f"{base_url}/local-trigger-rule",
-                data=body,
-                method="POST",
-                headers={"Content-Type": "application/json"},
-            )
-            with urlopen(request, timeout=5) as response:
-                response.read()
-    except HTTPError as exc:
-        text = exc.read().decode("utf-8", errors="replace")
-        return {"ok": False, "reason": f"http_{exc.code}", "response": text[:300]}
-    except URLError as exc:
-        return {"ok": False, "reason": f"network_error:{exc.reason}"}
-
+    state = bump_device_config_version(device_id)
     return {
-        "ok": True,
-        "device_ip": device_ip,
-        "command_port": command_port,
+        "ok": False,
+        "pending": True,
+        "reason": "awaiting_device_poll",
+        "desired_config_version": int(state.get("desired_config_version") or 1),
         "rules_sent": len(rules),
     }
 
@@ -1195,56 +1587,41 @@ def trigger_local_gpio(sensor: sqlite3.Row | dict, event_name: str) -> dict:
     if pin is None:
         return {"ok": False, "reason": "local_gpio_not_configured"}
 
-    device_ip = str(sensor_dict.get("device_last_seen_ip") or "").strip()
-    if not device_ip:
-        return {"ok": False, "reason": "device_ip_unknown"}
-
-    raw_port = sensor_dict.get("device_command_port")
-    try:
-        device_port = int(raw_port)
-    except (TypeError, ValueError):
-        device_port = 8088
-    if device_port <= 0:
-        device_port = 8088
-
+    device_id = str(sensor_dict.get("device_id") or "").strip()
+    if not device_id:
+        return {"ok": False, "reason": "device_not_configured"}
     level = sanitize_gpio_level(sensor_dict.get("automation_gpio_level"), "HIGH")
     duration_ms = sanitize_gpio_duration_ms(sensor_dict.get("automation_gpio_duration_ms"), 1000)
     repeat_count = sanitize_gpio_repeat_count(sensor_dict.get("automation_gpio_repeat_count"), 1)
-    payload = {
-        "pin": pin,
-        "active_level": level,
-        "duration_ms": duration_ms,
-        "repeat_count": repeat_count,
-        "sensor_id": sensor_dict.get("sensor_id", ""),
-        "event": event_name,
-    }
-
-    body = json.dumps(payload).encode("utf-8")
-    request = Request(
-        f"http://{device_ip}:{device_port}/gpio/pulse",
-        data=body,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
     try:
-        with urlopen(request, timeout=10) as response:
-            text = response.read().decode("utf-8", errors="replace")
-            parsed = json.loads(text) if text.strip().startswith("{") else text
-            return {
-                "ok": True,
-                "target": "local_gpio",
+        queued = queue_device_command(
+            device_id,
+            "gpio_pulse",
+            {
                 "pin": pin,
                 "active_level": level,
                 "duration_ms": duration_ms,
                 "repeat_count": repeat_count,
-                "status": response.status,
-                "response": parsed,
-            }
-    except HTTPError as exc:
-        error_text = exc.read().decode("utf-8", errors="replace")
-        return {"ok": False, "reason": f"http_{exc.code}", "response": error_text[:300]}
-    except URLError as exc:
-        return {"ok": False, "reason": f"network_error:{exc.reason}"}
+                "repeat_gap_ms": LOCAL_GPIO_PULSE_GAP_MS,
+                "sensor_id": str(sensor_dict.get("sensor_id", "") or ""),
+                "event": event_name,
+            },
+        )
+    except ValueError as exc:
+        return {"ok": False, "reason": str(exc)}
+
+    return {
+        "ok": True,
+        "queued": True,
+        "target": "local_gpio",
+        "device_id": device_id,
+        "command_id": queued["command_id"],
+        "pin": pin,
+        "active_level": level,
+        "duration_ms": duration_ms,
+        "repeat_count": repeat_count,
+        "repeat_gap_ms": LOCAL_GPIO_PULSE_GAP_MS,
+    }
 
 def list_snapshot_media_files() -> list[Path]:
     if not SNAPSHOTS_DIR.exists():
@@ -1413,6 +1790,7 @@ def upsert_sensors(payload: dict) -> dict:
         raise ValueError("device_id_required")
     if not isinstance(sensores, list) or not sensores:
         raise ValueError("sensors_required")
+    ensure_device_config_state(device_id)
 
     agora = app_now().isoformat()
     registrados = 0
@@ -2489,6 +2867,7 @@ def build_dashboard_payload() -> dict:
     for device_id in sorted(devices_index):
         runtime = fetch_device_runtime(device_id) or {}
         runtime_state = runtime if runtime else devices_index[device_id]
+        config_state = fetch_device_config_state(device_id) or {}
         dashboard_devices.append(
             {
                 "device_id": device_id,
@@ -2500,6 +2879,10 @@ def build_dashboard_payload() -> dict:
                 "device_local_gpio_rules": fetch_device_local_gpio_rules(device_id),
                 "device_local_trigger_pins": list(LOCAL_TRIGGER_ALLOWED_PINS),
                 "device_local_output_pins": list(LOCAL_TRIGGER_OUTPUT_ALLOWED_PINS),
+                "desired_config_version": int(config_state.get("desired_config_version") or 1),
+                "applied_config_version": int(config_state.get("applied_config_version") or 0),
+                "last_config_ack_at": str(config_state.get("last_config_ack_at", "") or ""),
+                "last_config_status": str(config_state.get("last_config_status", "") or ""),
             }
         )
 
@@ -2548,6 +2931,13 @@ def load_sensor_report_html() -> str:
     return "<html><body><h1>Relatorio indisponivel</h1></body></html>"
 
 
+def extract_bearer_token(header_value: str) -> str:
+    raw = str(header_value or "").strip()
+    if not raw.lower().startswith("bearer "):
+        return ""
+    return raw[7:].strip()
+
+
 class SensorHubHandler(BaseHTTPRequestHandler):
     server_version = "SensorHubAPI/3.0"
 
@@ -2581,6 +2971,20 @@ class SensorHubHandler(BaseHTTPRequestHandler):
             return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise ValueError("invalid_json")
+
+    def _device_auth_ok(self) -> bool:
+        if not DEVICE_SHARED_TOKEN:
+            return True
+        bearer = extract_bearer_token(self.headers.get("Authorization", ""))
+        fallback = str(self.headers.get("x-device-token", "") or "").strip()
+        presented = bearer or fallback
+        return bool(presented and presented == DEVICE_SHARED_TOKEN)
+
+    def _require_device_auth(self) -> bool:
+        if self._device_auth_ok():
+            return True
+        self._send_json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
+        return False
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -2646,6 +3050,55 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                     "timezone": "UTC-3",
                 },
             )
+            return
+
+        if parsed.path == "/api/device/poll":
+            if not self._require_device_auth():
+                return
+            device_id = params.get("device_id", [""])[0].strip()
+            if not device_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "device_id_required"})
+                return
+            try:
+                current_config_version = max(0, int(params.get("config_version", ["0"])[0]))
+            except ValueError:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid_config_version"})
+                return
+            try:
+                wait_seconds = int(float(params.get("wait_seconds", ["0"])[0]))
+            except ValueError:
+                wait_seconds = 0
+            wait_seconds = max(0, min(DEVICE_POLL_MAX_WAIT_SECONDS, wait_seconds))
+            try:
+                limit = int(params.get("limit", [str(DEVICE_COMMAND_BATCH_SIZE)])[0])
+            except ValueError:
+                limit = DEVICE_COMMAND_BATCH_SIZE
+            limit = max(1, min(25, limit))
+
+            started = time.monotonic()
+            while not device_poll_ready(device_id, current_config_version, limit=limit):
+                elapsed = time.monotonic() - started
+                if wait_seconds <= 0 or elapsed >= wait_seconds:
+                    break
+                time.sleep(min(0.25, wait_seconds - elapsed))
+
+            self._send_json(
+                HTTPStatus.OK,
+                build_device_poll_payload(device_id, current_config_version, limit=limit),
+            )
+            return
+
+        if parsed.path == "/api/device/config":
+            if not self._require_device_auth():
+                return
+            device_id = params.get("device_id", [""])[0].strip()
+            if not device_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "device_id_required"})
+                return
+            try:
+                self._send_json(HTTPStatus.OK, build_device_config_payload(device_id))
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
             return
 
         if parsed.path == "/api/system/cleanup":
@@ -2764,6 +3217,8 @@ class SensorHubHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/sensors/register":
+            if not self._require_device_auth():
+                return
             try:
                 result = upsert_sensors(payload)
             except ValueError as exc:
@@ -2773,8 +3228,11 @@ class SensorHubHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/devices/heartbeat":
+            if not self._require_device_auth():
+                return
             try:
                 raw_command_port = payload.get("command_port")
+                raw_config_version = payload.get("config_version")
                 try:
                     command_port = int(raw_command_port)
                 except (TypeError, ValueError):
@@ -2783,6 +3241,7 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                     str(payload.get("device_id", "")),
                     self.client_address[0] if self.client_address else "",
                     command_port,
+                    raw_config_version,
                 )
             except ValueError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
@@ -2791,6 +3250,8 @@ class SensorHubHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/movements":
+            if not self._require_device_auth():
+                return
             try:
                 result = insert_movement(payload)
             except ValueError as exc:
@@ -2803,6 +3264,28 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.ACCEPTED, {"ok": True, **result})
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, **result})
+            return
+
+        if parsed.path == "/api/device/config/ack":
+            if not self._require_device_auth():
+                return
+            try:
+                result = ack_device_config(payload)
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            return
+
+        if parsed.path == "/api/device/command/ack":
+            if not self._require_device_auth():
+                return
+            try:
+                result = ack_device_command(payload)
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, {"ok": True, **result})
             return
 
         if parsed.path == "/api/sensors/toggle":
