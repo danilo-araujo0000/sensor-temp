@@ -689,7 +689,7 @@
     }
     .local-trigger-rule-row {
       display: grid;
-      grid-template-columns: 92px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 90px;
+      grid-template-columns: 92px 96px repeat(5, minmax(0, 1fr));
       gap: 12px;
       align-items: end;
       padding: 14px;
@@ -953,19 +953,6 @@
             </div>
           </div>
 
-          <div id="local-trigger-status-box" class="automation-status-box">Carregando gatilhos locais do ESP32...</div>
-
-          <div class="automation-card">
-            <div class="automation-card-header">
-              <h4 class="automation-card-title">Gatilhos locais do ESP32</h4>
-              <span class="section-subline" style="margin:0;">Pulso em GND no pino de entrada aciona uma saida local sem depender do backend.</span>
-            </div>
-            <div id="local-trigger-rules" class="local-trigger-grid"></div>
-            <div class="automation-actions">
-              <span id="save-local-rules-feedback" class="subline" style="margin:0;"></span>
-              <button id="save-local-rules" class="btn primary" type="button">Salvar no ESP</button>
-            </div>
-          </div>
         </div>
       </div>
     </div>
@@ -1294,6 +1281,7 @@
 
     function renderLocalTriggerStatus(detail, syncResult) {
       const box = document.getElementById('local-trigger-status-box');
+      if (!box) return;
       const deviceIp = detail.sensor.device_last_seen_ip || 'desconhecido';
       const commandPort = detail.sensor.device_command_port || 8088;
       const enabledRules = (detail.sensor.device_local_gpio_rules || []).filter((rule) => !!rule.enabled);
@@ -1311,6 +1299,7 @@
     function renderLocalTriggerRules(detail) {
       if (window.isLocalRuleEditing) return;
       const container = document.getElementById('local-trigger-rules');
+      if (!container) return;
       const rules = detail.sensor.device_local_gpio_rules || [];
       const outputPins = detail.sensor.device_local_output_pins || [];
       container.innerHTML = rules.map((rule) => `
@@ -1337,14 +1326,23 @@
             </select>
           </div>
           <div class="form-group" style="margin:0;">
-            <label>Tempo (ms)</label>
+            <label>Pulso (ms)</label>
             <input class="form-control local-rule-input local-rule-hold" type="number" min="50" step="50" value="${rule.hold_ms || 1000}" />
+          </div>
+          <div class="form-group" style="margin:0;">
+            <label>Repeticoes</label>
+            <input class="form-control local-rule-input local-rule-repeat" type="number" min="1" max="20" step="1" value="${rule.repeat_count || 1}" />
+          </div>
+          <div class="form-group" style="margin:0;">
+            <label>Intervalo (ms)</label>
+            <input class="form-control local-rule-input local-rule-gap" type="number" min="0" step="50" value="${rule.repeat_gap_ms ?? 250}" />
           </div>
         </div>
       `).join('');
     }
 
     function syncLocalTriggerControls(detail, syncResult = null) {
+      if (!document.getElementById('local-trigger-rules') || !document.getElementById('local-trigger-status-box')) return;
       renderLocalTriggerRules(detail);
       renderLocalTriggerStatus(detail, syncResult);
     }
@@ -1680,12 +1678,15 @@
     });
 
     window.isLocalRuleEditing = false;
-    document.getElementById('local-trigger-rules').addEventListener('focusin', () => {
-      window.isLocalRuleEditing = true;
-    });
-    document.getElementById('local-trigger-rules').addEventListener('change', () => {
-      window.isLocalRuleEditing = true;
-    });
+    const localTriggerRulesEl = document.getElementById('local-trigger-rules');
+    if (localTriggerRulesEl) {
+      localTriggerRulesEl.addEventListener('focusin', () => {
+        window.isLocalRuleEditing = true;
+      });
+      localTriggerRulesEl.addEventListener('change', () => {
+        window.isLocalRuleEditing = true;
+      });
+    }
 
     document.getElementById('auto-target').addEventListener('change', updateAutomationFieldVisibility);
     document.getElementById('auto-device').addEventListener('change', () => {
@@ -1763,17 +1764,26 @@
     document.getElementById('refresh-external-devices').addEventListener('click', () => loadExternalDevices(true));
 
     function collectLocalTriggerRules() {
-      return Array.from(document.querySelectorAll('.local-trigger-rule-row')).map((row) => ({
-        trigger_pin: Number(row.dataset.triggerPin),
-        enabled: row.querySelector('.local-rule-enabled').checked,
-        output_pin: Number(row.querySelector('.local-rule-output').value || 6),
-        output_level: row.querySelector('.local-rule-level').value,
-        hold_ms: Number(row.querySelector('.local-rule-hold').value || 1000)
-      }));
+      return Array.from(document.querySelectorAll('.local-trigger-rule-row')).map((row) => {
+        const outputValue = row.querySelector('.local-rule-output').value;
+        const holdValue = row.querySelector('.local-rule-hold').value;
+        const repeatValue = row.querySelector('.local-rule-repeat').value;
+        const gapValue = row.querySelector('.local-rule-gap').value;
+        return {
+          trigger_pin: Number(row.dataset.triggerPin),
+          enabled: row.querySelector('.local-rule-enabled').checked,
+          output_pin: Number(outputValue || 6),
+          output_level: row.querySelector('.local-rule-level').value,
+          hold_ms: Number(holdValue || 1000),
+          repeat_count: Number(repeatValue || 1),
+          repeat_gap_ms: gapValue === '' ? 250 : Number(gapValue)
+        };
+      });
     }
 
     async function saveLocalTriggerRules() {
       const feedback = document.getElementById('save-local-rules-feedback');
+      if (!feedback) return;
       try {
         const result = await apiPost('/api/devices/local-gpio-rules', {
           sensor_id: sensorId,
@@ -1799,7 +1809,10 @@
       setTimeout(() => feedback.textContent = '', 4000);
     }
 
-    document.getElementById('save-local-rules').addEventListener('click', saveLocalTriggerRules);
+    const saveLocalRulesButton = document.getElementById('save-local-rules');
+    if (saveLocalRulesButton) {
+      saveLocalRulesButton.addEventListener('click', saveLocalTriggerRules);
+    }
 
     document.getElementById('save-schedule').addEventListener('click', async () => {
       const fb = document.getElementById('save-sch-feedback');

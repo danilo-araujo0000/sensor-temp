@@ -419,6 +419,7 @@
       .config-inputs .btn-save, .config-inputs .btn-test { width: 100%; }
       .card-header { flex-direction: column; align-items: flex-start; gap: 12px; }
       .contact-form { grid-template-columns: 1fr; }
+      .local-trigger-rule-row { grid-template-columns: 1fr; }
     }
 
     .modal-overlay {
@@ -430,7 +431,7 @@
     .modal-overlay.active { opacity: 1; pointer-events: auto; }
     .modal-content {
       background: var(--panel); border: 1px solid var(--panel-border);
-      border-radius: 20px; padding: 24px; width: 90%; max-width: 650px;
+      border-radius: 20px; padding: 24px; width: 90%; max-width: 980px;
       max-height: 90vh; overflow-y: auto;
     }
     .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
@@ -511,6 +512,125 @@
       font-family: inherit;
     }
     .btn-inline-danger:hover { background: rgba(239, 68, 68, 0.28); color: #fff; }
+    .section-subline {
+      color: var(--text-muted);
+      font-size: 0.92rem;
+    }
+    .automation-status-box {
+      margin-bottom: 16px;
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: var(--text-muted);
+      font-size: 0.92rem;
+    }
+    .automation-actions {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+    .subline {
+      color: var(--text-muted);
+      font-size: 0.92rem;
+      min-height: 20px;
+    }
+    .device-config-list {
+      display: grid;
+      gap: 16px;
+    }
+    .device-config-card {
+      padding: 18px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .device-config-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .device-config-title {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 600;
+      color: #fff;
+    }
+    .device-badge {
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.04);
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      font-weight: 600;
+    }
+    .device-badge.online {
+      color: #bbf7d0;
+      border-color: rgba(34,197,94,0.35);
+      background: rgba(34,197,94,0.12);
+    }
+    .device-badge.offline {
+      color: #fed7aa;
+      border-color: rgba(245,158,11,0.35);
+      background: rgba(245,158,11,0.12);
+    }
+    .local-trigger-grid {
+      display: grid;
+      gap: 12px;
+    }
+    .local-trigger-rule-row {
+      display: grid;
+      grid-template-columns: 92px 96px repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      align-items: end;
+      padding: 14px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .local-trigger-rule-pin {
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: #fff;
+    }
+    .local-trigger-rule-check {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 44px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+    .form-group {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+    .form-group label {
+      color: var(--text-muted);
+      font-size: 0.86rem;
+      font-weight: 600;
+    }
+    .form-control {
+      width: 100%;
+      padding: 10px 12px;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      color: #fff;
+      font-family: inherit;
+    }
+    .form-control:focus {
+      outline: none;
+      border-color: var(--blue);
+    }
   </style>
 </head>
 <body>
@@ -546,11 +666,18 @@
           <div class="config-group-content">
             <div class="contact-form">
               <input id="contact-name" type="text" placeholder="Nome da pessoa">
-              <input id="contact-phone" type="text" placeholder="Numero de telefone">
+              <input id="contact-phone" type="text" placeholder="55DDDNUMERO ou ID@g.us">
               <button id="save-contact" class="details-link" type="button">Salvar</button>
             </div>
             <div id="contact-feedback" style="font-size:0.9rem; min-height:20px; color:var(--text-muted); margin-bottom:10px;"></div>
             <div id="contact-list" class="contact-list"></div>
+          </div>
+        </details>
+        <details class="config-group">
+          <summary>Gatilhos locais do ESP32</summary>
+          <div class="config-group-content">
+            <div class="section-subline" style="margin-bottom:16px;">Essas regras pertencem ao hub/dispositivo, nao ao sensor individual. Um pulso em GND na entrada local dispara a saida configurada sem depender do backend no momento do evento.</div>
+            <div id="device-local-rules-panel" class="device-config-list"></div>
           </div>
         </details>
       </div>
@@ -571,6 +698,9 @@
     const cardsEl = document.getElementById('cards');
     let showHiddenSensors = false;
     let lastRenderedCount = -1;
+    let lastDashboardData = null;
+    let currentDevices = [];
+    let lastDeviceRuleSync = {};
 
     document.getElementById('toggle-hidden-sensors').addEventListener('change', (e) => {
         showHiddenSensors = e.target.checked;
@@ -664,6 +794,148 @@
       }
     }
 
+    function formatDeviceEndpoint(device) {
+      const ip = device.device_last_seen_ip || 'desconhecido';
+      const port = device.device_command_port || 8088;
+      return `${ip}:${port}`;
+    }
+
+    function buildDeviceLocalRuleStatus(device, syncResult = null) {
+      const enabledRules = (device.device_local_gpio_rules || []).filter((rule) => !!rule.enabled);
+      const endpoint = formatDeviceEndpoint(device);
+      if (syncResult && syncResult.ok) {
+        return `Regras locais sincronizadas com ${syncResult.rules_sent} gatilhos no ESP ${syncResult.device_ip}:${syncResult.command_port}.`;
+      }
+      if (syncResult && !syncResult.ok) {
+        return `Regras salvas no backend, mas o ESP nao confirmou a sincronizacao. Motivo: ${syncResult.reason || 'desconhecido'}. Hub atual: ${endpoint}.`;
+      }
+      return `Hub em ${endpoint}. ${enabledRules.length} gatilho(s) local(is) ativo(s).`;
+    }
+
+    function renderDeviceLocalConfigs(devices, syncMap = {}) {
+      const panel = document.getElementById('device-local-rules-panel');
+      if (!panel || window.isDashboardLocalRuleEditing) return;
+      const orderedDevices = Array.isArray(devices) ? devices : [];
+      if (!orderedDevices.length) {
+        panel.innerHTML = '<div class="contact-empty">Nenhum hub registrado no momento.</div>';
+        return;
+      }
+
+      panel.innerHTML = orderedDevices.map((device) => `
+        <div class="device-config-card" data-device-id="${escapeHtml(device.device_id)}">
+          <div class="device-config-title-row">
+            <div>
+              <h3 class="device-config-title">${escapeHtml(device.device_id)}</h3>
+              <div class="section-subline">${Number(device.sensor_count || 0)} sensor(es) vinculados &middot; Hub ${escapeHtml(formatDeviceEndpoint(device))}</div>
+            </div>
+            <span class="device-badge ${device.device_online ? 'online' : 'offline'}">${device.device_online ? 'ONLINE' : 'OFFLINE'}</span>
+          </div>
+          <div class="automation-status-box">${escapeHtml(buildDeviceLocalRuleStatus(device, syncMap[device.device_id] || null))}</div>
+          <div class="local-trigger-grid">
+            ${(device.device_local_gpio_rules || []).map((rule) => `
+              <div class="local-trigger-rule-row" data-trigger-pin="${rule.trigger_pin}">
+                <div class="local-trigger-rule-pin">GPIO ${rule.trigger_pin}<div style="margin-top:6px; color:var(--text-muted); font-size:0.78rem;">Pulso em GND</div></div>
+                <div class="local-trigger-rule-check">
+                  <label class="switch" style="width: 40px; height: 22px;">
+                    <input class="local-rule-input local-rule-enabled" type="checkbox" ${rule.enabled ? 'checked' : ''} />
+                    <span class="slider"></span>
+                  </label>
+                  <span>Ativo</span>
+                </div>
+                <div class="form-group">
+                  <label>Saida local</label>
+                  <select class="form-control local-rule-input local-rule-output">
+                    ${(device.device_local_output_pins || []).map((pin) => `<option value="${pin}" ${Number(rule.output_pin) === Number(pin) ? 'selected' : ''}>GPIO ${pin}</option>`).join('')}
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Nivel da saida</label>
+                  <select class="form-control local-rule-input local-rule-level">
+                    <option value="HIGH" ${rule.output_level === 'HIGH' ? 'selected' : ''}>HIGH (VCC)</option>
+                    <option value="LOW" ${rule.output_level === 'LOW' ? 'selected' : ''}>LOW (GND)</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Pulso (ms)</label>
+                  <input class="form-control local-rule-input local-rule-hold" type="number" min="50" step="50" value="${rule.hold_ms || 1000}" />
+                </div>
+                <div class="form-group">
+                  <label>Repeticoes</label>
+                  <input class="form-control local-rule-input local-rule-repeat" type="number" min="1" max="20" step="1" value="${rule.repeat_count || 1}" />
+                </div>
+                <div class="form-group">
+                  <label>Intervalo (ms)</label>
+                  <input class="form-control local-rule-input local-rule-gap" type="number" min="0" step="50" value="${rule.repeat_gap_ms ?? 250}" />
+                </div>
+              </div>
+            `).join('')}
+          </div>
+          <div class="automation-actions">
+            <span class="subline local-device-feedback"></span>
+            <button class="details-link save-device-local-rules" type="button">Salvar no ESP</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function collectDeviceLocalTriggerRules(card) {
+      return Array.from(card.querySelectorAll('.local-trigger-rule-row')).map((row) => {
+        const outputValue = row.querySelector('.local-rule-output').value;
+        const holdValue = row.querySelector('.local-rule-hold').value;
+        const repeatValue = row.querySelector('.local-rule-repeat').value;
+        const gapValue = row.querySelector('.local-rule-gap').value;
+        return {
+          trigger_pin: Number(row.dataset.triggerPin),
+          enabled: row.querySelector('.local-rule-enabled').checked,
+          output_pin: Number(outputValue || 10),
+          output_level: row.querySelector('.local-rule-level').value,
+          hold_ms: Number(holdValue || 1000),
+          repeat_count: Number(repeatValue || 1),
+          repeat_gap_ms: gapValue === '' ? 250 : Number(gapValue)
+        };
+      });
+    }
+
+    async function saveDeviceLocalTriggerRules(button) {
+      const card = button.closest('.device-config-card');
+      if (!card) return;
+      const deviceId = card.dataset.deviceId || '';
+      const feedback = card.querySelector('.local-device-feedback');
+      button.disabled = true;
+      try {
+        const result = await apiPost('/api/devices/local-gpio-rules', {
+          device_id: deviceId,
+          rules: collectDeviceLocalTriggerRules(card)
+        });
+        currentDevices = currentDevices.map((device) => (
+          device.device_id === deviceId
+            ? {
+                ...device,
+                device_local_gpio_rules: result.rules || [],
+                device_last_seen_ip: result.sync && result.sync.device_ip ? result.sync.device_ip : device.device_last_seen_ip,
+                device_command_port: result.sync && result.sync.command_port ? result.sync.command_port : device.device_command_port
+              }
+            : device
+        ));
+        lastDeviceRuleSync[deviceId] = result.sync || null;
+        window.isDashboardLocalRuleEditing = false;
+        renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
+        if (result.sync && result.sync.ok) {
+          feedback.textContent = 'Regras locais salvas e sincronizadas no ESP.';
+          feedback.style.color = 'var(--green)';
+        } else {
+          feedback.textContent = 'Regras salvas no backend. O ESP nao confirmou a sincronizacao agora.';
+          feedback.style.color = 'var(--orange)';
+        }
+        window.setTimeout(() => loadDashboard(true), 1200);
+      } catch (error) {
+        feedback.textContent = 'Falha ao salvar gatilhos locais.';
+        feedback.style.color = 'var(--danger)';
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     // Attach event listeners for a specific card toggle
     function setupToggleListener(toggle) {
       toggle.addEventListener('change', async (event) => {
@@ -686,6 +958,9 @@
     async function loadDashboard(forceRedraw = false) {
       const response = await fetch('/api/dashboard');
       const data = await response.json();
+      lastDashboardData = data;
+      currentDevices = data.devices || [];
+      renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
 
       const visibleSensors = data.sensors.filter(s => s.show_on_dashboard || showHiddenSensors);
 
@@ -777,20 +1052,41 @@
 
     // Modal global config logic
     const configModal = document.getElementById('config-modal');
+    const deviceLocalRulesPanel = document.getElementById('device-local-rules-panel');
     document.getElementById('btn-config').addEventListener('click', () => {
       configModal.classList.add('active');
       loadContacts();
+      renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
     });
 
     document.getElementById('btn-close-config').addEventListener('click', () => {
+      window.isDashboardLocalRuleEditing = false;
       configModal.classList.remove('active');
+      renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
     });
 
     configModal.addEventListener('click', (e) => {
       if (e.target === configModal) {
+        window.isDashboardLocalRuleEditing = false;
         configModal.classList.remove('active');
+        renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
       }
     });
+
+    if (deviceLocalRulesPanel) {
+      window.isDashboardLocalRuleEditing = false;
+      deviceLocalRulesPanel.addEventListener('focusin', () => {
+        window.isDashboardLocalRuleEditing = true;
+      });
+      deviceLocalRulesPanel.addEventListener('change', () => {
+        window.isDashboardLocalRuleEditing = true;
+      });
+      deviceLocalRulesPanel.addEventListener('click', async (event) => {
+        const button = event.target.closest('.save-device-local-rules');
+        if (!button) return;
+        await saveDeviceLocalTriggerRules(button);
+      });
+    }
 
     document.getElementById('save-contact').addEventListener('click', async () => {
       const feedback = document.getElementById('contact-feedback');

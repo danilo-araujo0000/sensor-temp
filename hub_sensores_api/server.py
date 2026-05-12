@@ -100,8 +100,7 @@ EXTERNAL_API_INSECURE_TLS = env_bool("EXTERNAL_API_INSECURE_TLS", False)
 EXTERNAL_API_DEVICE_CACHE_SECONDS = max(env_int("EXTERNAL_API_DEVICE_CACHE_SECONDS", 300), 30)
 DEVICE_HEARTBEAT_TIMEOUT_SECONDS = max(env_int("DEVICE_HEARTBEAT_TIMEOUT_SECONDS", 10), 3)
 MODERATOR_API_BASE_URL = env_value("MODERATOR_API_BASE_URL", "").rstrip("/")
-MODERATOR_API_USERNAME = env_value("MODERATOR_API_USERNAME", "")
-MODERATOR_API_PASSWORD = env_value("MODERATOR_API_PASSWORD", "")
+MODERATOR_API_TOKEN = env_value("MODERATOR_API_TOKEN", "")
 MODERATOR_API_TIMEOUT_SECONDS = max(env_int("MODERATOR_API_TIMEOUT_SECONDS", 15), 3)
 SENSOR_AUTOMATION_GPIO_ALLOWED_PINS = (15, 16, 17, 18)
 LOCAL_TRIGGER_OUTPUT_ALLOWED_PINS = (10, 11, 12, 13)
@@ -127,8 +126,6 @@ FFMPEG_BIN = resolve_ffmpeg_bin()
 EXTERNAL_API_SSL_CONTEXT = ssl._create_unverified_context() if EXTERNAL_API_INSECURE_TLS else ssl.create_default_context()
 EXTERNAL_DEVICE_CACHE = {"fetched_at": 0.0, "devices": [], "error": None}
 EXTERNAL_DEVICE_CACHE_LOCK = threading.Lock()
-MODERATOR_COOKIE_HEADER = ""
-MODERATOR_COOKIE_LOCK = threading.Lock()
 
 
 def app_now() -> datetime:
@@ -258,10 +255,14 @@ def init_db() -> None:
                 output_pin INTEGER,
                 output_level TEXT NOT NULL DEFAULT 'HIGH',
                 hold_ms INTEGER NOT NULL DEFAULT 1000,
+                repeat_count INTEGER NOT NULL DEFAULT 1,
+                repeat_gap_ms INTEGER NOT NULL DEFAULT 250,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        ensure_column(conn, "device_local_gpio_rules", "repeat_count", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "device_local_gpio_rules", "repeat_gap_ms", "INTEGER NOT NULL DEFAULT 250")
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_device_local_gpio_rules_device_trigger
@@ -494,6 +495,18 @@ def sanitize_local_rule_hold_ms(value: object, default: int = 1000) -> int:
     return min(max(normalized, 50), LOCAL_TRIGGER_RULE_MAX_MS)
 
 
+def sanitize_local_rule_repeat_count(value: object, default: int = 1) -> int:
+    return sanitize_gpio_repeat_count(value, default)
+
+
+def sanitize_local_rule_repeat_gap_ms(value: object, default: int = LOCAL_GPIO_PULSE_GAP_MS) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(normalized, 0), LOCAL_TRIGGER_RULE_MAX_MS)
+
+
 def external_api_ready() -> bool:
     return bool(EXTERNAL_API_BASE_URL and EXTERNAL_API_TOKEN)
 
@@ -619,6 +632,24 @@ def fetch_device_runtime(device_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def device_exists(device_id: str) -> bool:
+    normalized = device_id.strip()
+    if not normalized:
+        return False
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM sensors
+            WHERE device_id = ?
+            LIMIT 1
+            """,
+            (normalized,),
+        ).fetchone()
+    return row is not None
+
+
 def default_device_local_gpio_rules(device_id: str) -> list[dict]:
     return [
         {
@@ -628,6 +659,8 @@ def default_device_local_gpio_rules(device_id: str) -> list[dict]:
             "output_pin": LOCAL_TRIGGER_DEFAULT_OUTPUT_PIN,
             "output_level": "HIGH",
             "hold_ms": 1000,
+            "repeat_count": 1,
+            "repeat_gap_ms": LOCAL_GPIO_PULSE_GAP_MS,
         }
         for trigger_pin in LOCAL_TRIGGER_ALLOWED_PINS
     ]
@@ -646,7 +679,7 @@ def fetch_device_local_gpio_rules(device_id: str) -> list[dict]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT trigger_pin, enabled, output_pin, output_level, hold_ms
+            SELECT trigger_pin, enabled, output_pin, output_level, hold_ms, repeat_count, repeat_gap_ms
             FROM device_local_gpio_rules
             WHERE device_id = ?
             ORDER BY trigger_pin
@@ -666,6 +699,8 @@ def fetch_device_local_gpio_rules(device_id: str) -> list[dict]:
             "output_pin": output_pin if output_pin is not None else LOCAL_TRIGGER_DEFAULT_OUTPUT_PIN,
             "output_level": sanitize_gpio_level(row["output_level"], "HIGH"),
             "hold_ms": sanitize_local_rule_hold_ms(row["hold_ms"], 1000),
+            "repeat_count": sanitize_local_rule_repeat_count(row["repeat_count"], 1),
+            "repeat_gap_ms": sanitize_local_rule_repeat_gap_ms(row["repeat_gap_ms"], LOCAL_GPIO_PULSE_GAP_MS),
         }
 
     return [rules_by_trigger[trigger_pin] for trigger_pin in LOCAL_TRIGGER_ALLOWED_PINS]
@@ -719,9 +754,9 @@ def save_device_local_gpio_rules(device_id: str, rules: list[dict]) -> list[dict
             conn.execute(
                 """
                 INSERT INTO device_local_gpio_rules (
-                    device_id, trigger_pin, enabled, output_pin, output_level, hold_ms, updated_at
+                    device_id, trigger_pin, enabled, output_pin, output_level, hold_ms, repeat_count, repeat_gap_ms, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized,
@@ -730,6 +765,8 @@ def save_device_local_gpio_rules(device_id: str, rules: list[dict]) -> list[dict
                     output_pin,
                     sanitize_gpio_level(rule.get("output_level"), "HIGH"),
                     sanitize_local_rule_hold_ms(rule.get("hold_ms"), 1000),
+                    sanitize_local_rule_repeat_count(rule.get("repeat_count"), 1),
+                    sanitize_local_rule_repeat_gap_ms(rule.get("repeat_gap_ms"), LOCAL_GPIO_PULSE_GAP_MS),
                     agora,
                 ),
             )
@@ -775,6 +812,8 @@ def push_device_local_gpio_rules(device_id: str, rules: list[dict]) -> dict:
                     "output_pin": int(rule["output_pin"]),
                     "output_level": sanitize_gpio_level(rule["output_level"], "HIGH"),
                     "hold_ms": int(rule["hold_ms"]),
+                    "repeat_count": int(rule["repeat_count"]),
+                    "repeat_gap_ms": int(rule["repeat_gap_ms"]),
                 }
             ).encode("utf-8")
             request = Request(
@@ -800,13 +839,18 @@ def push_device_local_gpio_rules(device_id: str, rules: list[dict]) -> dict:
 
 
 def update_device_local_gpio_rules(payload: dict) -> dict | None:
-    sensor_id = str(payload.get("sensor_id", "")).strip()
-    if not sensor_id:
-        raise ValueError("sensor_id_required")
-
-    sensor = fetch_sensor(sensor_id)
-    if sensor is None:
-        return None
+    device_id = str(payload.get("device_id", "")).strip()
+    if device_id:
+        if not device_exists(device_id):
+            return None
+    else:
+        sensor_id = str(payload.get("sensor_id", "")).strip()
+        if not sensor_id:
+            raise ValueError("device_id_or_sensor_id_required")
+        sensor = fetch_sensor(sensor_id)
+        if sensor is None:
+            return None
+        device_id = str(sensor["device_id"])
 
     raw_rules = payload.get("rules")
     if not isinstance(raw_rules, list):
@@ -828,10 +872,11 @@ def update_device_local_gpio_rules(payload: dict) -> dict | None:
                 "output_pin": sanitize_local_output_pin(raw_rule.get("output_pin")) if isinstance(raw_rule, dict) else LOCAL_TRIGGER_DEFAULT_OUTPUT_PIN,
                 "output_level": sanitize_gpio_level(raw_rule.get("output_level"), "HIGH") if isinstance(raw_rule, dict) else "HIGH",
                 "hold_ms": sanitize_local_rule_hold_ms(raw_rule.get("hold_ms"), 1000) if isinstance(raw_rule, dict) else 1000,
+                "repeat_count": sanitize_local_rule_repeat_count(raw_rule.get("repeat_count"), 1) if isinstance(raw_rule, dict) else 1,
+                "repeat_gap_ms": sanitize_local_rule_repeat_gap_ms(raw_rule.get("repeat_gap_ms"), LOCAL_GPIO_PULSE_GAP_MS) if isinstance(raw_rule, dict) else LOCAL_GPIO_PULSE_GAP_MS,
             }
         )
 
-    device_id = str(sensor["device_id"])
     saved_rules = save_device_local_gpio_rules(device_id, normalized_rules)
     sync_result = push_device_local_gpio_rules(device_id, saved_rules)
     return {
@@ -869,17 +914,21 @@ def external_api_request(path: str, method: str = "GET", payload: dict | None = 
 
 
 def moderator_api_ready() -> bool:
-    return bool(MODERATOR_API_BASE_URL and MODERATOR_API_USERNAME and MODERATOR_API_PASSWORD)
+    return bool(MODERATOR_API_BASE_URL and MODERATOR_API_TOKEN)
 
 
-def moderator_api_request(path: str, method: str = "GET", payload: dict | None = None, *, use_cookie: bool = True) -> dict:
-    if not MODERATOR_API_BASE_URL:
+def moderator_api_request(path: str, method: str = "GET", payload: dict | None = None) -> dict:
+    if not moderator_api_ready():
         raise RuntimeError("moderator_api_not_configured")
 
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if use_cookie and MODERATOR_COOKIE_HEADER:
-        headers["Cookie"] = MODERATOR_COOKIE_HEADER
+    body = None
+    headers = {
+        "x-api-key": MODERATOR_API_TOKEN,
+        "Authorization": f"Bearer {MODERATOR_API_TOKEN}",
+    }
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
 
     request = Request(
         f"{MODERATOR_API_BASE_URL}{path}",
@@ -890,8 +939,11 @@ def moderator_api_request(path: str, method: str = "GET", payload: dict | None =
     try:
         with urlopen(request, timeout=MODERATOR_API_TIMEOUT_SECONDS) as response:
             text = response.read().decode("utf-8", errors="replace")
+            content_type = response.headers.get("Content-Type", "")
+            parsed = json.loads(text) if "json" in content_type.lower() and text else text
             return {
                 "status": response.status,
+                "body": parsed,
                 "text": text,
                 "headers": response.headers,
             }
@@ -900,32 +952,6 @@ def moderator_api_request(path: str, method: str = "GET", payload: dict | None =
         raise RuntimeError(f"moderator_http_{exc.code}: {text[:300]}") from exc
     except URLError as exc:
         raise RuntimeError(f"moderator_network_error: {exc.reason}") from exc
-
-
-def moderator_login(force: bool = False) -> None:
-    global MODERATOR_COOKIE_HEADER
-    if not moderator_api_ready():
-        raise RuntimeError("moderator_api_not_configured")
-
-    with MODERATOR_COOKIE_LOCK:
-        if MODERATOR_COOKIE_HEADER and not force:
-            return
-        response = moderator_api_request(
-            "/api/auth/login",
-            "POST",
-            {
-                "username": MODERATOR_API_USERNAME,
-                "password": MODERATOR_API_PASSWORD,
-            },
-            use_cookie=False,
-        )
-        cookies = response["headers"].get_all("Set-Cookie") if hasattr(response["headers"], "get_all") else []
-        cookie_pairs = []
-        for cookie in cookies or []:
-            cookie_pairs.append(cookie.split(";", 1)[0])
-        if not cookie_pairs:
-            raise RuntimeError("moderator_login_without_cookie")
-        MODERATOR_COOKIE_HEADER = "; ".join(cookie_pairs)
 
 
 def get_contacts_by_ids(contact_ids: list[int]) -> list[dict]:
@@ -962,6 +988,31 @@ def build_notification_message(sensor: sqlite3.Row | dict, event_name: str) -> s
     )
 
 
+def normalize_contact_phone_value(phone: object) -> str | None:
+    raw_value = str(phone or "").strip()
+    if not raw_value:
+        return None
+    if "@" in raw_value:
+        return raw_value.lower()
+    digits_only = re.sub(r"\D+", "", raw_value)
+    if not digits_only:
+        return None
+    if digits_only.startswith("00"):
+        digits_only = digits_only[2:]
+    if len(digits_only) in {10, 11}:
+        digits_only = f"55{digits_only}"
+    return digits_only
+
+
+def build_contact_chat_id(phone: object) -> str | None:
+    normalized_value = normalize_contact_phone_value(phone)
+    if not normalized_value:
+        return None
+    if "@" in normalized_value:
+        return normalized_value
+    return f"{normalized_value}@c.us"
+
+
 def notify_contacts(sensor: sqlite3.Row | dict, event_name: str) -> dict:
     sensor_dict = dict(sensor)
     if not bool(sensor_dict.get("automation_notify_enabled")):
@@ -975,28 +1026,29 @@ def notify_contacts(sensor: sqlite3.Row | dict, event_name: str) -> dict:
         return {"ok": False, "reason": "moderator_api_not_configured"}
 
     message = build_notification_message(sensor, event_name)
-    moderator_login()
     sent = []
     errors = []
     for contact in contacts:
+        chat_id = build_contact_chat_id(contact.get("phone"))
+        if not chat_id:
+            errors.append({"contact_id": contact["id"], "error": "invalid_chat_id"})
+            continue
         payload = {
-            "chatId": str(contact["phone"]),
+            "chatId": chat_id,
             "text": message,
         }
         try:
-            response = moderator_api_request("/api/messages/send", "POST", payload)
-            sent.append({"contact_id": contact["id"], "phone": contact["phone"], "status": response["status"]})
+            response = moderator_api_request("/api/external/send-message", "POST", payload)
+            sent.append(
+                {
+                    "contact_id": contact["id"],
+                    "phone": contact["phone"],
+                    "chat_id": chat_id,
+                    "status": response["status"],
+                }
+            )
         except RuntimeError as exc:
-            if "moderator_http_401" in str(exc):
-                try:
-                    moderator_login(force=True)
-                    response = moderator_api_request("/api/messages/send", "POST", payload)
-                    sent.append({"contact_id": contact["id"], "phone": contact["phone"], "status": response["status"]})
-                    continue
-                except RuntimeError as retry_exc:
-                    errors.append({"contact_id": contact["id"], "error": str(retry_exc)})
-            else:
-                errors.append({"contact_id": contact["id"], "error": str(exc)})
+            errors.append({"contact_id": contact["id"], "error": str(exc)})
 
     return {
         "ok": bool(sent) and not errors,
@@ -2099,7 +2151,7 @@ def list_contacts() -> list[dict]:
 
 def create_contact(name: str, phone: str) -> dict:
     normalized_name = str(name or "").strip()
-    normalized_phone = str(phone or "").strip()
+    normalized_phone = normalize_contact_phone_value(phone)
     if not normalized_name:
         raise ValueError("contact_name_required")
     if not normalized_phone:
@@ -2356,6 +2408,7 @@ def build_dashboard_payload() -> dict:
     enabled_count = 0
     moving_count = 0
     dashboard_sensors = []
+    devices_index: dict[str, dict] = {}
 
     for sensor in sensores:
         bins = [0] * DASHBOARD_BIN_COUNT
@@ -2387,10 +2440,25 @@ def build_dashboard_payload() -> dict:
             tone = "active"
             status_label = "ATIVO"
 
+        device_id = str(sensor["device_id"])
+        device_entry = devices_index.setdefault(
+            device_id,
+            {
+                "device_id": device_id,
+                "sensor_count": 0,
+                "device_online": False,
+                "device_last_seen_epoch": sensor.get("device_last_seen_epoch"),
+            },
+        )
+        device_entry["sensor_count"] += 1
+        device_entry["device_online"] = bool(device_entry["device_online"] or device_online)
+        if sensor.get("device_last_seen_epoch") is not None:
+            device_entry["device_last_seen_epoch"] = sensor.get("device_last_seen_epoch")
+
         dashboard_sensors.append(
             {
                 "sensor_id": sensor["sensor_id"],
-                "device_id": sensor["device_id"],
+                "device_id": device_id,
                 "pin": sensor["pin"],
                 "name": sensor["name"],
                 "icon": sensor["icon"],
@@ -2417,6 +2485,24 @@ def build_dashboard_payload() -> dict:
         system_label = "SYSTEM PARTIAL"
         system_tone = "warning"
 
+    dashboard_devices = []
+    for device_id in sorted(devices_index):
+        runtime = fetch_device_runtime(device_id) or {}
+        runtime_state = runtime if runtime else devices_index[device_id]
+        dashboard_devices.append(
+            {
+                "device_id": device_id,
+                "sensor_count": int(devices_index[device_id]["sensor_count"]),
+                "device_online": bool(is_device_online(runtime_state, agora_epoch)),
+                "device_last_seen_epoch": runtime.get("device_last_seen_epoch", devices_index[device_id].get("device_last_seen_epoch")),
+                "device_last_seen_ip": str(runtime.get("device_last_seen_ip", "") or ""),
+                "device_command_port": runtime.get("device_command_port"),
+                "device_local_gpio_rules": fetch_device_local_gpio_rules(device_id),
+                "device_local_trigger_pins": list(LOCAL_TRIGGER_ALLOWED_PINS),
+                "device_local_output_pins": list(LOCAL_TRIGGER_OUTPUT_ALLOWED_PINS),
+            }
+        )
+
     return {
         "ok": True,
         "summary": {
@@ -2431,6 +2517,7 @@ def build_dashboard_payload() -> dict:
             "tone": system_tone,
         },
         "sensors": dashboard_sensors,
+        "devices": dashboard_devices,
     }
 
 
@@ -2875,7 +2962,8 @@ class SensorHubHandler(BaseHTTPRequestHandler):
             try:
                 result = update_device_local_gpio_rules(payload)
                 if result is None:
-                    self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "sensor_not_found"})
+                    error_code = "device_not_found" if str(payload.get("device_id", "")).strip() else "sensor_not_found"
+                    self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": error_code})
                 else:
                     self._send_json(HTTPStatus.OK, {"ok": True, **result})
             except ValueError as exc:

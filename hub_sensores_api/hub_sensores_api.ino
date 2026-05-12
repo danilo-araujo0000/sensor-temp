@@ -17,6 +17,8 @@ constexpr unsigned long WIFI_MAX_OFFLINE_MS = 5UL * 60UL * 1000UL;
 constexpr unsigned long HEALTH_CHECK_MS = 60UL * 1000UL;
 constexpr unsigned long DEVICE_HEARTBEAT_MS = 3UL * 1000UL;
 constexpr unsigned long LOCAL_GPIO_GAP_MS = 250UL;
+constexpr unsigned long LOCAL_TRIGGER_DEBOUNCE_MS = 60UL;
+constexpr unsigned long LOCAL_TRIGGER_REARM_MS = 250UL;
 constexpr uint8_t HEALTH_MAX_FALHAS = 5;
 constexpr uint32_t WATCHDOG_TIMEOUT_SECONDS = 20;
 constexpr uint8_t PINO_SEM_SECUNDARIO = 255;
@@ -24,9 +26,11 @@ constexpr uint16_t DEVICE_COMMAND_PORT = 8088;
 constexpr uint8_t PINOS_GPIO_AUTOMACAO_SENSOR[] = {15, 16, 17, 18};
 constexpr uint8_t PINOS_GATILHO_LOCAL[] = {4, 5, 6, 7};
 constexpr uint8_t PINOS_SAIDA_GATILHO_LOCAL[] = {10, 11, 12, 13};
+constexpr uint8_t PINOS_SAIDA_CONTROLADAS[] = {10, 11, 12, 13, 15, 16, 17, 18};
 constexpr size_t TOTAL_PINOS_GPIO_AUTOMACAO_SENSOR = sizeof(PINOS_GPIO_AUTOMACAO_SENSOR) / sizeof(PINOS_GPIO_AUTOMACAO_SENSOR[0]);
 constexpr size_t TOTAL_PINOS_GATILHO_LOCAL = sizeof(PINOS_GATILHO_LOCAL) / sizeof(PINOS_GATILHO_LOCAL[0]);
 constexpr size_t TOTAL_PINOS_SAIDA_GATILHO_LOCAL = sizeof(PINOS_SAIDA_GATILHO_LOCAL) / sizeof(PINOS_SAIDA_GATILHO_LOCAL[0]);
+constexpr size_t TOTAL_PINOS_SAIDA_CONTROLADAS = sizeof(PINOS_SAIDA_CONTROLADAS) / sizeof(PINOS_SAIDA_CONTROLADAS[0]);
 constexpr char PREFERENCES_NAMESPACE[] = "hublocal";
 
 WebServer deviceServer(DEVICE_COMMAND_PORT);
@@ -55,14 +59,24 @@ struct RegraGatilhoLocal {
   uint8_t outputPin;
   bool outputActiveHigh;
   unsigned long holdMs;
+  uint8_t repeatCount;
+  unsigned long repeatGapMs;
+  bool rawInputActive;
   bool lastInputActive;
+  bool armed;
+  unsigned long rawChangedAtMs;
+  unsigned long releaseSinceMs;
 };
 
 struct EstadoSaidaLocal {
   uint8_t pin;
-  bool active;
+  bool sequenceActive;
   bool activeHigh;
-  unsigned long releaseAtMs;
+  bool pulseActive;
+  uint8_t pendingPulses;
+  unsigned long nextTransitionAtMs;
+  unsigned long holdMs;
+  unsigned long gapMs;
 };
 
 #include "sensores_config.h"
@@ -82,7 +96,7 @@ bool registroBackendTentado = false;
 bool servidorLocalAtivo = false;
 bool preferencesAtivas = false;
 RegraGatilhoLocal regrasGatilhoLocal[TOTAL_PINOS_GATILHO_LOCAL];
-EstadoSaidaLocal estadosSaidaLocal[TOTAL_PINOS_SAIDA_GATILHO_LOCAL];
+EstadoSaidaLocal estadosSaidaLocal[TOTAL_PINOS_SAIDA_CONTROLADAS];
 
 enum EstadoIndicadorLed {
   LedBoot,
@@ -176,7 +190,7 @@ int indiceRegraGatilhoLocal(uint8_t triggerPin) {
 }
 
 EstadoSaidaLocal* buscarEstadoSaidaLocal(uint8_t pin) {
-  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_GATILHO_LOCAL; i++) {
+  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_CONTROLADAS; i++) {
     if (estadosSaidaLocal[i].pin == pin) {
       return &estadosSaidaLocal[i];
     }
@@ -464,14 +478,24 @@ void inicializarRegrasGatilhoLocal() {
     regrasGatilhoLocal[i].outputPin = PINOS_SAIDA_GATILHO_LOCAL[0];
     regrasGatilhoLocal[i].outputActiveHigh = true;
     regrasGatilhoLocal[i].holdMs = 1000;
+    regrasGatilhoLocal[i].repeatCount = 1;
+    regrasGatilhoLocal[i].repeatGapMs = LOCAL_GPIO_GAP_MS;
+    regrasGatilhoLocal[i].rawInputActive = false;
     regrasGatilhoLocal[i].lastInputActive = false;
+    regrasGatilhoLocal[i].armed = false;
+    regrasGatilhoLocal[i].rawChangedAtMs = 0;
+    regrasGatilhoLocal[i].releaseSinceMs = 0;
   }
 
-  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_GATILHO_LOCAL; i++) {
-    estadosSaidaLocal[i].pin = PINOS_SAIDA_GATILHO_LOCAL[i];
-    estadosSaidaLocal[i].active = false;
+  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_CONTROLADAS; i++) {
+    estadosSaidaLocal[i].pin = PINOS_SAIDA_CONTROLADAS[i];
+    estadosSaidaLocal[i].sequenceActive = false;
     estadosSaidaLocal[i].activeHigh = true;
-    estadosSaidaLocal[i].releaseAtMs = 0;
+    estadosSaidaLocal[i].pulseActive = false;
+    estadosSaidaLocal[i].pendingPulses = 0;
+    estadosSaidaLocal[i].nextTransitionAtMs = 0;
+    estadosSaidaLocal[i].holdMs = 0;
+    estadosSaidaLocal[i].gapMs = 0;
   }
 }
 
@@ -491,6 +515,10 @@ void salvarRegrasGatilhoLocal() {
     preferences.putBool(key, regrasGatilhoLocal[i].outputActiveHigh);
     snprintf(key, sizeof(key), "r%u_ms", static_cast<unsigned>(i));
     preferences.putUInt(key, static_cast<uint32_t>(regrasGatilhoLocal[i].holdMs));
+    snprintf(key, sizeof(key), "r%u_rc", static_cast<unsigned>(i));
+    preferences.putUChar(key, regrasGatilhoLocal[i].repeatCount);
+    snprintf(key, sizeof(key), "r%u_gp", static_cast<unsigned>(i));
+    preferences.putUInt(key, static_cast<uint32_t>(regrasGatilhoLocal[i].repeatGapMs));
   }
 }
 
@@ -517,7 +545,18 @@ void carregarRegrasGatilhoLocal() {
     regra.outputActiveHigh = preferences.getBool(key, true);
     snprintf(key, sizeof(key), "r%u_ms", static_cast<unsigned>(i));
     regra.holdMs = preferences.getUInt(key, 1000);
+    snprintf(key, sizeof(key), "r%u_rc", static_cast<unsigned>(i));
+    regra.repeatCount = preferences.getUChar(key, 1);
+    snprintf(key, sizeof(key), "r%u_gp", static_cast<unsigned>(i));
+    regra.repeatGapMs = preferences.getUInt(key, LOCAL_GPIO_GAP_MS);
+    if (regra.repeatCount < 1) regra.repeatCount = 1;
+    if (regra.repeatCount > 20) regra.repeatCount = 20;
+    if (regra.repeatGapMs > 600000UL) regra.repeatGapMs = 600000UL;
+    regra.rawInputActive = false;
     regra.lastInputActive = false;
+    regra.armed = false;
+    regra.rawChangedAtMs = 0;
+    regra.releaseSinceMs = 0;
 
     if (regra.enabled && !regraGatilhoLocalValida(regra, static_cast<int>(i))) {
       regra.enabled = false;
@@ -527,16 +566,25 @@ void carregarRegrasGatilhoLocal() {
 }
 
 void aplicarConfiguracaoRegrasGatilhoLocal() {
-  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_GATILHO_LOCAL; i++) {
+  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_CONTROLADAS; i++) {
     pinMode(estadosSaidaLocal[i].pin, INPUT);
-    estadosSaidaLocal[i].active = false;
-    estadosSaidaLocal[i].releaseAtMs = 0;
+    estadosSaidaLocal[i].sequenceActive = false;
+    estadosSaidaLocal[i].pulseActive = false;
+    estadosSaidaLocal[i].pendingPulses = 0;
+    estadosSaidaLocal[i].nextTransitionAtMs = 0;
+    estadosSaidaLocal[i].holdMs = 0;
+    estadosSaidaLocal[i].gapMs = 0;
   }
 
   for (size_t i = 0; i < TOTAL_PINOS_GATILHO_LOCAL; i++) {
     RegraGatilhoLocal& regra = regrasGatilhoLocal[i];
     pinMode(regra.triggerPin, INPUT_PULLUP);
-    regra.lastInputActive = digitalRead(regra.triggerPin) == LOW;
+    bool entradaAtiva = digitalRead(regra.triggerPin) == LOW;
+    regra.rawInputActive = entradaAtiva;
+    regra.lastInputActive = entradaAtiva;
+    regra.armed = !entradaAtiva;
+    regra.rawChangedAtMs = millis();
+    regra.releaseSinceMs = entradaAtiva ? 0 : millis();
 
     if (!regra.enabled) {
       continue;
@@ -546,48 +594,105 @@ void aplicarConfiguracaoRegrasGatilhoLocal() {
   }
 }
 
-void agendarSaidaLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs) {
+bool agendarSaidaLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs, uint8_t repeticoes, unsigned long intervaloEntreRepeticoesMs) {
   EstadoSaidaLocal* estado = buscarEstadoSaidaLocal(pin);
-  if (estado == nullptr) return;
+  if (estado == nullptr) return false;
+  if (pinoEhSensorConfigurado(pin)) return false;
+  if (repeticoes < 1) repeticoes = 1;
+  if (repeticoes > 20) repeticoes = 20;
+  if (intervaloEntreRepeticoesMs > 600000UL) intervaloEntreRepeticoesMs = 600000UL;
 
   pinMode(pin, OUTPUT);
   digitalWrite(pin, ativoEmHigh ? HIGH : LOW);
-  estado->active = true;
+  estado->sequenceActive = true;
   estado->activeHigh = ativoEmHigh;
-  estado->releaseAtMs = millis() + duracaoMs;
+  estado->pulseActive = true;
+  estado->pendingPulses = repeticoes - 1;
+  estado->nextTransitionAtMs = millis() + duracaoMs;
+  estado->holdMs = duracaoMs;
+  estado->gapMs = intervaloEntreRepeticoesMs;
+  return true;
 }
 
 void atualizarSaidasLocais() {
   unsigned long agora = millis();
-  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_GATILHO_LOCAL; i++) {
+  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_CONTROLADAS; i++) {
     EstadoSaidaLocal& estado = estadosSaidaLocal[i];
-    if (!estado.active) continue;
+    if (!estado.sequenceActive) continue;
 
-    if (static_cast<long>(agora - estado.releaseAtMs) >= 0) {
+    if (static_cast<long>(agora - estado.nextTransitionAtMs) < 0) continue;
+
+    if (estado.pulseActive) {
       configurarGpioLocalInativo(estado.pin, estado.activeHigh);
-      estado.active = false;
-      estado.releaseAtMs = 0;
+      estado.pulseActive = false;
+      if (estado.pendingPulses == 0) {
+        estado.sequenceActive = false;
+        estado.nextTransitionAtMs = 0;
+        estado.holdMs = 0;
+        estado.gapMs = 0;
+      } else {
+        estado.nextTransitionAtMs = agora + estado.gapMs;
+      }
+      continue;
     }
+
+    pinMode(estado.pin, OUTPUT);
+    digitalWrite(estado.pin, estado.activeHigh ? HIGH : LOW);
+    estado.pulseActive = true;
+    estado.pendingPulses--;
+    estado.nextTransitionAtMs = agora + estado.holdMs;
   }
 }
 
 void avaliarGatilhosLocais() {
+  unsigned long agora = millis();
   for (size_t i = 0; i < TOTAL_PINOS_GATILHO_LOCAL; i++) {
     RegraGatilhoLocal& regra = regrasGatilhoLocal[i];
     if (!regra.enabled) continue;
+    bool ativacaoEstavel = false;
 
-    bool ativo = digitalRead(regra.triggerPin) == LOW;
-    if (ativo && !regra.lastInputActive) {
+    bool leituraAtiva = digitalRead(regra.triggerPin) == LOW;
+    if (leituraAtiva != regra.rawInputActive) {
+      regra.rawInputActive = leituraAtiva;
+      regra.rawChangedAtMs = agora;
+    }
+
+    if (
+      regra.rawInputActive != regra.lastInputActive
+      && static_cast<long>(agora - regra.rawChangedAtMs) >= static_cast<long>(LOCAL_TRIGGER_DEBOUNCE_MS)
+    ) {
+      regra.lastInputActive = regra.rawInputActive;
+      if (regra.lastInputActive) {
+        regra.releaseSinceMs = 0;
+        ativacaoEstavel = true;
+      } else {
+        regra.releaseSinceMs = agora;
+      }
+    }
+
+    if (!regra.lastInputActive && !regra.armed && regra.releaseSinceMs != 0 && static_cast<long>(agora - regra.releaseSinceMs) >= static_cast<long>(LOCAL_TRIGGER_REARM_MS)) {
+      regra.armed = true;
+    }
+
+    EstadoSaidaLocal* estadoSaida = buscarEstadoSaidaLocal(regra.outputPin);
+    bool saidaOcupada = estadoSaida != nullptr && estadoSaida->sequenceActive;
+    if (ativacaoEstavel && regra.armed && !saidaOcupada) {
       Serial.print("Gatilho local em GPIO ");
       Serial.print(regra.triggerPin);
       Serial.print(" -> saida GPIO ");
       Serial.print(regra.outputPin);
       Serial.print(" por ");
       Serial.print(regra.holdMs);
+      Serial.print(" ms x ");
+      Serial.print(regra.repeatCount);
+      Serial.print(" intervalo=");
+      Serial.print(regra.repeatGapMs);
       Serial.println(" ms");
-      agendarSaidaLocal(regra.outputPin, regra.outputActiveHigh, regra.holdMs);
+      agendarSaidaLocal(regra.outputPin, regra.outputActiveHigh, regra.holdMs, regra.repeatCount, regra.repeatGapMs);
+      regra.armed = false;
+    } else if (ativacaoEstavel && regra.armed && saidaOcupada) {
+      regra.armed = false;
     }
-    regra.lastInputActive = ativo;
   }
 }
 
@@ -601,7 +706,9 @@ String montarJsonRegrasGatilhoLocal() {
     json += "\"enabled\":" + String(regra.enabled ? "true" : "false") + ",";
     json += "\"output_pin\":" + String(regra.outputPin) + ",";
     json += "\"output_level\":\"" + String(regra.outputActiveHigh ? "HIGH" : "LOW") + "\",";
-    json += "\"hold_ms\":" + String(regra.holdMs);
+    json += "\"hold_ms\":" + String(regra.holdMs) + ",";
+    json += "\"repeat_count\":" + String(regra.repeatCount) + ",";
+    json += "\"repeat_gap_ms\":" + String(regra.repeatGapMs);
     json += "}";
   }
   json += "]}";
@@ -617,31 +724,6 @@ void configurarGpioLocalInativo(uint8_t pin, bool ativoEmHigh) {
   digitalWrite(pin, ativoEmHigh ? LOW : HIGH);
 }
 
-void acionarGpioLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs, uint8_t repeticoes) {
-  if (pinoEhSensorConfigurado(pin)) {
-    Serial.print("GPIO local recusado no pino ");
-    Serial.print(pin);
-    Serial.println(" porque ele esta configurado como sensor.");
-    return;
-  }
-
-  uint8_t nivelAtivo = ativoEmHigh ? HIGH : LOW;
-  uint8_t nivelInativo = ativoEmHigh ? LOW : HIGH;
-
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, nivelInativo);
-
-  for (uint8_t i = 0; i < repeticoes; i++) {
-    digitalWrite(pin, nivelAtivo);
-    delayComWatchdog(duracaoMs);
-    digitalWrite(pin, nivelInativo);
-
-    if (i + 1 < repeticoes) {
-      delayComWatchdog(LOCAL_GPIO_GAP_MS);
-    }
-  }
-}
-
 void processarPulsoGpioLocal() {
   if (deviceServer.method() != HTTP_POST) {
     responderJsonLocal(405, "{\"ok\":false,\"error\":\"method_not_allowed\"}");
@@ -652,6 +734,7 @@ void processarPulsoGpioLocal() {
   int pin = extrairCampoJsonInt(payload, "pin", -1);
   int durationMs = extrairCampoJsonInt(payload, "duration_ms", 1000);
   int repeatCount = extrairCampoJsonInt(payload, "repeat_count", 1);
+  int repeatGapMs = extrairCampoJsonInt(payload, "repeat_gap_ms", LOCAL_GPIO_GAP_MS);
   String activeLevel = extrairCampoJsonString(payload, "active_level");
   activeLevel.toUpperCase();
 
@@ -674,6 +757,8 @@ void processarPulsoGpioLocal() {
   if (durationMs > 600000) durationMs = 600000;
   if (repeatCount < 1) repeatCount = 1;
   if (repeatCount > 20) repeatCount = 20;
+  if (repeatGapMs < 0) repeatGapMs = 0;
+  if (repeatGapMs > 600000) repeatGapMs = 600000;
 
   bool ativoEmHigh = activeLevel == "HIGH";
   Serial.print("GPIO local acionado no pino ");
@@ -683,10 +768,17 @@ void processarPulsoGpioLocal() {
   Serial.print(" duracaoMs=");
   Serial.print(durationMs);
   Serial.print(" repeticoes=");
-  Serial.println(repeatCount);
+  Serial.print(repeatCount);
+  Serial.print(" intervalo=");
+  Serial.print(repeatGapMs);
+  Serial.println(" ms");
 
-  acionarGpioLocal(static_cast<uint8_t>(pin), ativoEmHigh, static_cast<unsigned long>(durationMs), static_cast<uint8_t>(repeatCount));
-  responderJsonLocal(200, "{\"ok\":true}");
+  if (!agendarSaidaLocal(static_cast<uint8_t>(pin), ativoEmHigh, static_cast<unsigned long>(durationMs), static_cast<uint8_t>(repeatCount), static_cast<unsigned long>(repeatGapMs))) {
+    responderJsonLocal(409, "{\"ok\":false,\"error\":\"pin_schedule_failed\"}");
+    return;
+  }
+
+  responderJsonLocal(200, "{\"ok\":true,\"scheduled\":true}");
 }
 
 void processarRegraGatilhoLocal() {
@@ -700,6 +792,8 @@ void processarRegraGatilhoLocal() {
   bool enabled = extrairCampoJsonBool(payload, "enabled", false);
   int outputPin = extrairCampoJsonInt(payload, "output_pin", -1);
   int holdMs = extrairCampoJsonInt(payload, "hold_ms", 1000);
+  int repeatCount = extrairCampoJsonInt(payload, "repeat_count", 1);
+  int repeatGapMs = extrairCampoJsonInt(payload, "repeat_gap_ms", LOCAL_GPIO_GAP_MS);
   String outputLevel = extrairCampoJsonString(payload, "output_level");
   outputLevel.toUpperCase();
 
@@ -717,6 +811,10 @@ void processarRegraGatilhoLocal() {
   }
   if (holdMs < 50) holdMs = 50;
   if (holdMs > 600000) holdMs = 600000;
+  if (repeatCount < 1) repeatCount = 1;
+  if (repeatCount > 20) repeatCount = 20;
+  if (repeatGapMs < 0) repeatGapMs = 0;
+  if (repeatGapMs > 600000) repeatGapMs = 600000;
 
   int indice = indiceRegraGatilhoLocal(static_cast<uint8_t>(triggerPin));
   if (indice < 0) {
@@ -729,6 +827,8 @@ void processarRegraGatilhoLocal() {
   candidata.outputPin = static_cast<uint8_t>(outputPin);
   candidata.outputActiveHigh = outputLevel == "HIGH";
   candidata.holdMs = static_cast<unsigned long>(holdMs);
+  candidata.repeatCount = static_cast<uint8_t>(repeatCount);
+  candidata.repeatGapMs = static_cast<unsigned long>(repeatGapMs);
   candidata.lastInputActive = false;
 
   if (enabled && !regraGatilhoLocalValida(candidata, indice)) {

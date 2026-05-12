@@ -19,6 +19,8 @@ constexpr unsigned long WIFI_MAX_OFFLINE_MS = 5UL * 60UL * 1000UL;
 constexpr unsigned long HEALTH_CHECK_MS = 60UL * 1000UL;
 constexpr unsigned long DEVICE_HEARTBEAT_MS = 3UL * 1000UL;
 constexpr unsigned long LOCAL_GPIO_GAP_MS = 250UL;
+constexpr unsigned long LOCAL_TRIGGER_DEBOUNCE_MS = 60UL;
+constexpr unsigned long LOCAL_TRIGGER_REARM_MS = 250UL;
 constexpr uint8_t HEALTH_MAX_FALHAS = 5;
 constexpr uint32_t WATCHDOG_TIMEOUT_SECONDS = 20;
 constexpr uint8_t PINO_SEM_SECUNDARIO = 255;
@@ -26,9 +28,11 @@ constexpr uint16_t DEVICE_COMMAND_PORT = 8088;
 constexpr uint8_t PINOS_GPIO_AUTOMACAO_SENSOR[] = {15, 16, 17, 18};
 constexpr uint8_t PINOS_GATILHO_LOCAL[] = {4, 5, 6, 7};
 constexpr uint8_t PINOS_SAIDA_GATILHO_LOCAL[] = {10, 11, 12, 13};
+constexpr uint8_t PINOS_SAIDA_CONTROLADAS[] = {10, 11, 12, 13, 15, 16, 17, 18};
 constexpr size_t TOTAL_PINOS_GPIO_AUTOMACAO_SENSOR = sizeof(PINOS_GPIO_AUTOMACAO_SENSOR) / sizeof(PINOS_GPIO_AUTOMACAO_SENSOR[0]);
 constexpr size_t TOTAL_PINOS_GATILHO_LOCAL = sizeof(PINOS_GATILHO_LOCAL) / sizeof(PINOS_GATILHO_LOCAL[0]);
 constexpr size_t TOTAL_PINOS_SAIDA_GATILHO_LOCAL = sizeof(PINOS_SAIDA_GATILHO_LOCAL) / sizeof(PINOS_SAIDA_GATILHO_LOCAL[0]);
+constexpr size_t TOTAL_PINOS_SAIDA_CONTROLADAS = sizeof(PINOS_SAIDA_CONTROLADAS) / sizeof(PINOS_SAIDA_CONTROLADAS[0]);
 constexpr char PREFERENCES_NAMESPACE[] = "hublocal";
 
 WebServer deviceServer(DEVICE_COMMAND_PORT);
@@ -57,14 +61,24 @@ struct RegraGatilhoLocal {
   uint8_t outputPin;
   bool outputActiveHigh;
   unsigned long holdMs;
+  uint8_t repeatCount;
+  unsigned long repeatGapMs;
+  bool rawInputActive;
   bool lastInputActive;
+  bool armed;
+  unsigned long rawChangedAtMs;
+  unsigned long releaseSinceMs;
 };
 
 struct EstadoSaidaLocal {
   uint8_t pin;
-  bool active;
+  bool sequenceActive;
   bool activeHigh;
-  unsigned long releaseAtMs;
+  bool pulseActive;
+  uint8_t pendingPulses;
+  unsigned long nextTransitionAtMs;
+  unsigned long holdMs;
+  unsigned long gapMs;
 };
 
 #include "sensores_config.h"
@@ -84,7 +98,7 @@ bool registroBackendTentado = false;
 bool servidorLocalAtivo = false;
 bool preferencesAtivas = false;
 RegraGatilhoLocal regrasGatilhoLocal[TOTAL_PINOS_GATILHO_LOCAL];
-EstadoSaidaLocal estadosSaidaLocal[TOTAL_PINOS_SAIDA_GATILHO_LOCAL];
+EstadoSaidaLocal estadosSaidaLocal[TOTAL_PINOS_SAIDA_CONTROLADAS];
 
 enum EstadoIndicadorLed {
   LedBoot,
@@ -129,107 +143,105 @@ constexpr FaseLed PADRAO_LED_BACKEND_OFFLINE[] = {
 EstadoIndicadorLed estadoIndicadorLed = LedBoot;
 unsigned long estadoIndicadorLedDesdeMs = 0;
 
-#line 130 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 144 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool pinoGpioAutomacaoSensorPermitido(int pin);
-#line 139 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 153 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool pinoGatilhoLocalPermitido(int pin);
-#line 148 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 162 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool pinoSaidaGatilhoLocalPermitido(int pin);
-#line 157 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 171 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool pinoEhSensorConfigurado(uint8_t pin);
-#line 169 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 183 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 int indiceRegraGatilhoLocal(uint8_t triggerPin);
-#line 178 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 192 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 EstadoSaidaLocal* buscarEstadoSaidaLocal(uint8_t pin);
-#line 187 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 201 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void alimentarWatchdog();
-#line 193 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 207 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void delayComWatchdog(unsigned long duracaoMs);
-#line 205 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 219 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void reiniciarDispositivo(const char* motivo);
-#line 213 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 227 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void setupWatchdog();
-#line 231 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 245 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void setLedColor(uint8_t red, uint8_t green, uint8_t blue);
-#line 239 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 253 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool faseLedLigada(const FaseLed* fases, size_t totalFases, unsigned long tempoDecorridoMs);
-#line 260 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 274 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void definirEstadoIndicadorLed(EstadoIndicadorLed novoEstado);
-#line 269 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-void sincronizarIndicadorLed();
 #line 283 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void sincronizarIndicadorLed();
+#line 297 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void atualizarIndicadorLed();
-#line 338 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 352 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void piscarStatus(uint8_t red, uint8_t green, uint8_t blue, uint8_t repeticoes, unsigned long intervaloMs);
-#line 347 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 361 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void acenderStatus(uint8_t red, uint8_t green, uint8_t blue, unsigned long duracaoMs);
-#line 353 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-void piscarStatusPorDuracao(uint8_t red, uint8_t green, uint8_t blue, unsigned long duracaoMs, unsigned long intervaloMs);
-#line 363 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-String montarSensorId(const SensorConfig& sensor);
 #line 367 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void piscarStatusPorDuracao(uint8_t red, uint8_t green, uint8_t blue, unsigned long duracaoMs, unsigned long intervaloMs);
+#line 377 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+String montarSensorId(const SensorConfig& sensor);
+#line 381 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 String extrairCampoJsonString(const String& payload, const char* chave);
-#line 389 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 403 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 int extrairCampoJsonInt(const String& payload, const char* chave, int valorPadrao);
-#line 417 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 431 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool extrairCampoJsonBool(const String& payload, const char* chave, bool valorPadrao);
-#line 460 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 474 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void inicializarRegrasGatilhoLocal();
-#line 478 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 502 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void salvarRegrasGatilhoLocal();
-#line 497 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 525 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void carregarRegrasGatilhoLocal();
-#line 529 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 568 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void aplicarConfiguracaoRegrasGatilhoLocal();
-#line 549 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-void agendarSaidaLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs);
-#line 560 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 597 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool agendarSaidaLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs, uint8_t repeticoes, unsigned long intervaloEntreRepeticoesMs);
+#line 617 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void atualizarSaidasLocais();
-#line 574 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 647 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void avaliarGatilhosLocais();
-#line 594 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 699 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 String montarJsonRegrasGatilhoLocal();
-#line 611 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 718 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void responderJsonLocal(int httpCode, const String& corpo);
-#line 615 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 722 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void configurarGpioLocalInativo(uint8_t pin, bool ativoEmHigh);
-#line 620 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-void acionarGpioLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs, uint8_t repeticoes);
-#line 645 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 727 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void processarPulsoGpioLocal();
-#line 692 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 784 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void processarRegraGatilhoLocal();
-#line 745 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-void processarResetRegrasGatilhoLocal();
-#line 757 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-void setupServidorLocal();
-#line 777 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-bool pinoEstaAtivo(uint8_t pin, TipoLigacao ligacao);
-#line 782 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-bool sensorEstaAtivo(const SensorConfig& sensor);
-#line 794 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-bool postJson(const char* url, const String& payload, int& httpCode, String& resposta);
-#line 814 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-String montarUrl(const char* rota);
-#line 818 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-bool verificarHealthBackend();
 #line 845 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
-bool registrarSensoresNoBackend();
+void processarResetRegrasGatilhoLocal();
+#line 857 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+void setupServidorLocal();
+#line 877 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool pinoEstaAtivo(uint8_t pin, TipoLigacao ligacao);
 #line 882 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool sensorEstaAtivo(const SensorConfig& sensor);
+#line 894 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool postJson(const char* url, const String& payload, int& httpCode, String& resposta);
+#line 914 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+String montarUrl(const char* rota);
+#line 918 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool verificarHealthBackend();
+#line 945 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+bool registrarSensoresNoBackend();
+#line 982 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void conectarWifi();
-#line 915 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 1015 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool enviarEvento(const SensorConfig& sensor);
-#line 939 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 1039 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool enviarHeartbeatDispositivo();
-#line 954 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 1054 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void configurarPinoSensor(uint8_t pin, TipoLigacao ligacao);
-#line 962 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 1062 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void setupSensores();
-#line 980 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 1080 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void setup();
-#line 1003 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 1103 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 void loop();
-#line 130 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
+#line 144 "C:\\Users\\danilo\\Documents\\build\\sensor pre\\sensor-temp\\hub_sensores_api\\hub_sensores_api.ino"
 bool pinoGpioAutomacaoSensorPermitido(int pin) {
   for (uint8_t permitido : PINOS_GPIO_AUTOMACAO_SENSOR) {
     if (pin == permitido) {
@@ -279,7 +291,7 @@ int indiceRegraGatilhoLocal(uint8_t triggerPin) {
 }
 
 EstadoSaidaLocal* buscarEstadoSaidaLocal(uint8_t pin) {
-  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_GATILHO_LOCAL; i++) {
+  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_CONTROLADAS; i++) {
     if (estadosSaidaLocal[i].pin == pin) {
       return &estadosSaidaLocal[i];
     }
@@ -567,14 +579,24 @@ void inicializarRegrasGatilhoLocal() {
     regrasGatilhoLocal[i].outputPin = PINOS_SAIDA_GATILHO_LOCAL[0];
     regrasGatilhoLocal[i].outputActiveHigh = true;
     regrasGatilhoLocal[i].holdMs = 1000;
+    regrasGatilhoLocal[i].repeatCount = 1;
+    regrasGatilhoLocal[i].repeatGapMs = LOCAL_GPIO_GAP_MS;
+    regrasGatilhoLocal[i].rawInputActive = false;
     regrasGatilhoLocal[i].lastInputActive = false;
+    regrasGatilhoLocal[i].armed = false;
+    regrasGatilhoLocal[i].rawChangedAtMs = 0;
+    regrasGatilhoLocal[i].releaseSinceMs = 0;
   }
 
-  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_GATILHO_LOCAL; i++) {
-    estadosSaidaLocal[i].pin = PINOS_SAIDA_GATILHO_LOCAL[i];
-    estadosSaidaLocal[i].active = false;
+  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_CONTROLADAS; i++) {
+    estadosSaidaLocal[i].pin = PINOS_SAIDA_CONTROLADAS[i];
+    estadosSaidaLocal[i].sequenceActive = false;
     estadosSaidaLocal[i].activeHigh = true;
-    estadosSaidaLocal[i].releaseAtMs = 0;
+    estadosSaidaLocal[i].pulseActive = false;
+    estadosSaidaLocal[i].pendingPulses = 0;
+    estadosSaidaLocal[i].nextTransitionAtMs = 0;
+    estadosSaidaLocal[i].holdMs = 0;
+    estadosSaidaLocal[i].gapMs = 0;
   }
 }
 
@@ -594,6 +616,10 @@ void salvarRegrasGatilhoLocal() {
     preferences.putBool(key, regrasGatilhoLocal[i].outputActiveHigh);
     snprintf(key, sizeof(key), "r%u_ms", static_cast<unsigned>(i));
     preferences.putUInt(key, static_cast<uint32_t>(regrasGatilhoLocal[i].holdMs));
+    snprintf(key, sizeof(key), "r%u_rc", static_cast<unsigned>(i));
+    preferences.putUChar(key, regrasGatilhoLocal[i].repeatCount);
+    snprintf(key, sizeof(key), "r%u_gp", static_cast<unsigned>(i));
+    preferences.putUInt(key, static_cast<uint32_t>(regrasGatilhoLocal[i].repeatGapMs));
   }
 }
 
@@ -620,7 +646,18 @@ void carregarRegrasGatilhoLocal() {
     regra.outputActiveHigh = preferences.getBool(key, true);
     snprintf(key, sizeof(key), "r%u_ms", static_cast<unsigned>(i));
     regra.holdMs = preferences.getUInt(key, 1000);
+    snprintf(key, sizeof(key), "r%u_rc", static_cast<unsigned>(i));
+    regra.repeatCount = preferences.getUChar(key, 1);
+    snprintf(key, sizeof(key), "r%u_gp", static_cast<unsigned>(i));
+    regra.repeatGapMs = preferences.getUInt(key, LOCAL_GPIO_GAP_MS);
+    if (regra.repeatCount < 1) regra.repeatCount = 1;
+    if (regra.repeatCount > 20) regra.repeatCount = 20;
+    if (regra.repeatGapMs > 600000UL) regra.repeatGapMs = 600000UL;
+    regra.rawInputActive = false;
     regra.lastInputActive = false;
+    regra.armed = false;
+    regra.rawChangedAtMs = 0;
+    regra.releaseSinceMs = 0;
 
     if (regra.enabled && !regraGatilhoLocalValida(regra, static_cast<int>(i))) {
       regra.enabled = false;
@@ -630,16 +667,25 @@ void carregarRegrasGatilhoLocal() {
 }
 
 void aplicarConfiguracaoRegrasGatilhoLocal() {
-  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_GATILHO_LOCAL; i++) {
+  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_CONTROLADAS; i++) {
     pinMode(estadosSaidaLocal[i].pin, INPUT);
-    estadosSaidaLocal[i].active = false;
-    estadosSaidaLocal[i].releaseAtMs = 0;
+    estadosSaidaLocal[i].sequenceActive = false;
+    estadosSaidaLocal[i].pulseActive = false;
+    estadosSaidaLocal[i].pendingPulses = 0;
+    estadosSaidaLocal[i].nextTransitionAtMs = 0;
+    estadosSaidaLocal[i].holdMs = 0;
+    estadosSaidaLocal[i].gapMs = 0;
   }
 
   for (size_t i = 0; i < TOTAL_PINOS_GATILHO_LOCAL; i++) {
     RegraGatilhoLocal& regra = regrasGatilhoLocal[i];
     pinMode(regra.triggerPin, INPUT_PULLUP);
-    regra.lastInputActive = digitalRead(regra.triggerPin) == LOW;
+    bool entradaAtiva = digitalRead(regra.triggerPin) == LOW;
+    regra.rawInputActive = entradaAtiva;
+    regra.lastInputActive = entradaAtiva;
+    regra.armed = !entradaAtiva;
+    regra.rawChangedAtMs = millis();
+    regra.releaseSinceMs = entradaAtiva ? 0 : millis();
 
     if (!regra.enabled) {
       continue;
@@ -649,48 +695,105 @@ void aplicarConfiguracaoRegrasGatilhoLocal() {
   }
 }
 
-void agendarSaidaLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs) {
+bool agendarSaidaLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs, uint8_t repeticoes, unsigned long intervaloEntreRepeticoesMs) {
   EstadoSaidaLocal* estado = buscarEstadoSaidaLocal(pin);
-  if (estado == nullptr) return;
+  if (estado == nullptr) return false;
+  if (pinoEhSensorConfigurado(pin)) return false;
+  if (repeticoes < 1) repeticoes = 1;
+  if (repeticoes > 20) repeticoes = 20;
+  if (intervaloEntreRepeticoesMs > 600000UL) intervaloEntreRepeticoesMs = 600000UL;
 
   pinMode(pin, OUTPUT);
   digitalWrite(pin, ativoEmHigh ? HIGH : LOW);
-  estado->active = true;
+  estado->sequenceActive = true;
   estado->activeHigh = ativoEmHigh;
-  estado->releaseAtMs = millis() + duracaoMs;
+  estado->pulseActive = true;
+  estado->pendingPulses = repeticoes - 1;
+  estado->nextTransitionAtMs = millis() + duracaoMs;
+  estado->holdMs = duracaoMs;
+  estado->gapMs = intervaloEntreRepeticoesMs;
+  return true;
 }
 
 void atualizarSaidasLocais() {
   unsigned long agora = millis();
-  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_GATILHO_LOCAL; i++) {
+  for (size_t i = 0; i < TOTAL_PINOS_SAIDA_CONTROLADAS; i++) {
     EstadoSaidaLocal& estado = estadosSaidaLocal[i];
-    if (!estado.active) continue;
+    if (!estado.sequenceActive) continue;
 
-    if (static_cast<long>(agora - estado.releaseAtMs) >= 0) {
+    if (static_cast<long>(agora - estado.nextTransitionAtMs) < 0) continue;
+
+    if (estado.pulseActive) {
       configurarGpioLocalInativo(estado.pin, estado.activeHigh);
-      estado.active = false;
-      estado.releaseAtMs = 0;
+      estado.pulseActive = false;
+      if (estado.pendingPulses == 0) {
+        estado.sequenceActive = false;
+        estado.nextTransitionAtMs = 0;
+        estado.holdMs = 0;
+        estado.gapMs = 0;
+      } else {
+        estado.nextTransitionAtMs = agora + estado.gapMs;
+      }
+      continue;
     }
+
+    pinMode(estado.pin, OUTPUT);
+    digitalWrite(estado.pin, estado.activeHigh ? HIGH : LOW);
+    estado.pulseActive = true;
+    estado.pendingPulses--;
+    estado.nextTransitionAtMs = agora + estado.holdMs;
   }
 }
 
 void avaliarGatilhosLocais() {
+  unsigned long agora = millis();
   for (size_t i = 0; i < TOTAL_PINOS_GATILHO_LOCAL; i++) {
     RegraGatilhoLocal& regra = regrasGatilhoLocal[i];
     if (!regra.enabled) continue;
+    bool ativacaoEstavel = false;
 
-    bool ativo = digitalRead(regra.triggerPin) == LOW;
-    if (ativo && !regra.lastInputActive) {
+    bool leituraAtiva = digitalRead(regra.triggerPin) == LOW;
+    if (leituraAtiva != regra.rawInputActive) {
+      regra.rawInputActive = leituraAtiva;
+      regra.rawChangedAtMs = agora;
+    }
+
+    if (
+      regra.rawInputActive != regra.lastInputActive
+      && static_cast<long>(agora - regra.rawChangedAtMs) >= static_cast<long>(LOCAL_TRIGGER_DEBOUNCE_MS)
+    ) {
+      regra.lastInputActive = regra.rawInputActive;
+      if (regra.lastInputActive) {
+        regra.releaseSinceMs = 0;
+        ativacaoEstavel = true;
+      } else {
+        regra.releaseSinceMs = agora;
+      }
+    }
+
+    if (!regra.lastInputActive && !regra.armed && regra.releaseSinceMs != 0 && static_cast<long>(agora - regra.releaseSinceMs) >= static_cast<long>(LOCAL_TRIGGER_REARM_MS)) {
+      regra.armed = true;
+    }
+
+    EstadoSaidaLocal* estadoSaida = buscarEstadoSaidaLocal(regra.outputPin);
+    bool saidaOcupada = estadoSaida != nullptr && estadoSaida->sequenceActive;
+    if (ativacaoEstavel && regra.armed && !saidaOcupada) {
       Serial.print("Gatilho local em GPIO ");
       Serial.print(regra.triggerPin);
       Serial.print(" -> saida GPIO ");
       Serial.print(regra.outputPin);
       Serial.print(" por ");
       Serial.print(regra.holdMs);
+      Serial.print(" ms x ");
+      Serial.print(regra.repeatCount);
+      Serial.print(" intervalo=");
+      Serial.print(regra.repeatGapMs);
       Serial.println(" ms");
-      agendarSaidaLocal(regra.outputPin, regra.outputActiveHigh, regra.holdMs);
+      agendarSaidaLocal(regra.outputPin, regra.outputActiveHigh, regra.holdMs, regra.repeatCount, regra.repeatGapMs);
+      regra.armed = false;
+    } else if (ativacaoEstavel && regra.armed && saidaOcupada) {
+      regra.armed = false;
     }
-    regra.lastInputActive = ativo;
   }
 }
 
@@ -704,7 +807,9 @@ String montarJsonRegrasGatilhoLocal() {
     json += "\"enabled\":" + String(regra.enabled ? "true" : "false") + ",";
     json += "\"output_pin\":" + String(regra.outputPin) + ",";
     json += "\"output_level\":\"" + String(regra.outputActiveHigh ? "HIGH" : "LOW") + "\",";
-    json += "\"hold_ms\":" + String(regra.holdMs);
+    json += "\"hold_ms\":" + String(regra.holdMs) + ",";
+    json += "\"repeat_count\":" + String(regra.repeatCount) + ",";
+    json += "\"repeat_gap_ms\":" + String(regra.repeatGapMs);
     json += "}";
   }
   json += "]}";
@@ -720,31 +825,6 @@ void configurarGpioLocalInativo(uint8_t pin, bool ativoEmHigh) {
   digitalWrite(pin, ativoEmHigh ? LOW : HIGH);
 }
 
-void acionarGpioLocal(uint8_t pin, bool ativoEmHigh, unsigned long duracaoMs, uint8_t repeticoes) {
-  if (pinoEhSensorConfigurado(pin)) {
-    Serial.print("GPIO local recusado no pino ");
-    Serial.print(pin);
-    Serial.println(" porque ele esta configurado como sensor.");
-    return;
-  }
-
-  uint8_t nivelAtivo = ativoEmHigh ? HIGH : LOW;
-  uint8_t nivelInativo = ativoEmHigh ? LOW : HIGH;
-
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, nivelInativo);
-
-  for (uint8_t i = 0; i < repeticoes; i++) {
-    digitalWrite(pin, nivelAtivo);
-    delayComWatchdog(duracaoMs);
-    digitalWrite(pin, nivelInativo);
-
-    if (i + 1 < repeticoes) {
-      delayComWatchdog(LOCAL_GPIO_GAP_MS);
-    }
-  }
-}
-
 void processarPulsoGpioLocal() {
   if (deviceServer.method() != HTTP_POST) {
     responderJsonLocal(405, "{\"ok\":false,\"error\":\"method_not_allowed\"}");
@@ -755,6 +835,7 @@ void processarPulsoGpioLocal() {
   int pin = extrairCampoJsonInt(payload, "pin", -1);
   int durationMs = extrairCampoJsonInt(payload, "duration_ms", 1000);
   int repeatCount = extrairCampoJsonInt(payload, "repeat_count", 1);
+  int repeatGapMs = extrairCampoJsonInt(payload, "repeat_gap_ms", LOCAL_GPIO_GAP_MS);
   String activeLevel = extrairCampoJsonString(payload, "active_level");
   activeLevel.toUpperCase();
 
@@ -777,6 +858,8 @@ void processarPulsoGpioLocal() {
   if (durationMs > 600000) durationMs = 600000;
   if (repeatCount < 1) repeatCount = 1;
   if (repeatCount > 20) repeatCount = 20;
+  if (repeatGapMs < 0) repeatGapMs = 0;
+  if (repeatGapMs > 600000) repeatGapMs = 600000;
 
   bool ativoEmHigh = activeLevel == "HIGH";
   Serial.print("GPIO local acionado no pino ");
@@ -786,10 +869,17 @@ void processarPulsoGpioLocal() {
   Serial.print(" duracaoMs=");
   Serial.print(durationMs);
   Serial.print(" repeticoes=");
-  Serial.println(repeatCount);
+  Serial.print(repeatCount);
+  Serial.print(" intervalo=");
+  Serial.print(repeatGapMs);
+  Serial.println(" ms");
 
-  acionarGpioLocal(static_cast<uint8_t>(pin), ativoEmHigh, static_cast<unsigned long>(durationMs), static_cast<uint8_t>(repeatCount));
-  responderJsonLocal(200, "{\"ok\":true}");
+  if (!agendarSaidaLocal(static_cast<uint8_t>(pin), ativoEmHigh, static_cast<unsigned long>(durationMs), static_cast<uint8_t>(repeatCount), static_cast<unsigned long>(repeatGapMs))) {
+    responderJsonLocal(409, "{\"ok\":false,\"error\":\"pin_schedule_failed\"}");
+    return;
+  }
+
+  responderJsonLocal(200, "{\"ok\":true,\"scheduled\":true}");
 }
 
 void processarRegraGatilhoLocal() {
@@ -803,6 +893,8 @@ void processarRegraGatilhoLocal() {
   bool enabled = extrairCampoJsonBool(payload, "enabled", false);
   int outputPin = extrairCampoJsonInt(payload, "output_pin", -1);
   int holdMs = extrairCampoJsonInt(payload, "hold_ms", 1000);
+  int repeatCount = extrairCampoJsonInt(payload, "repeat_count", 1);
+  int repeatGapMs = extrairCampoJsonInt(payload, "repeat_gap_ms", LOCAL_GPIO_GAP_MS);
   String outputLevel = extrairCampoJsonString(payload, "output_level");
   outputLevel.toUpperCase();
 
@@ -820,6 +912,10 @@ void processarRegraGatilhoLocal() {
   }
   if (holdMs < 50) holdMs = 50;
   if (holdMs > 600000) holdMs = 600000;
+  if (repeatCount < 1) repeatCount = 1;
+  if (repeatCount > 20) repeatCount = 20;
+  if (repeatGapMs < 0) repeatGapMs = 0;
+  if (repeatGapMs > 600000) repeatGapMs = 600000;
 
   int indice = indiceRegraGatilhoLocal(static_cast<uint8_t>(triggerPin));
   if (indice < 0) {
@@ -832,6 +928,8 @@ void processarRegraGatilhoLocal() {
   candidata.outputPin = static_cast<uint8_t>(outputPin);
   candidata.outputActiveHigh = outputLevel == "HIGH";
   candidata.holdMs = static_cast<unsigned long>(holdMs);
+  candidata.repeatCount = static_cast<uint8_t>(repeatCount);
+  candidata.repeatGapMs = static_cast<unsigned long>(repeatGapMs);
   candidata.lastInputActive = false;
 
   if (enabled && !regraGatilhoLocalValida(candidata, indice)) {
