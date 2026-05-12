@@ -63,6 +63,13 @@ constexpr size_t TOTAL_PINOS_SAIDA_GATILHO_LOCAL = sizeof(PINOS_SAIDA_GATILHO_LO
 constexpr size_t TOTAL_PINOS_SAIDA_CONTROLADAS = sizeof(PINOS_SAIDA_CONTROLADAS) / sizeof(PINOS_SAIDA_CONTROLADAS[0]);
 constexpr char PREFERENCES_NAMESPACE[] = "hublocal";
 constexpr char PREFERENCES_CONFIG_VERSION_KEY[] = "cfg_ver";
+constexpr size_t DEVICE_LOG_QUEUE_SIZE = 24;
+constexpr size_t DEVICE_LOG_BATCH_SIZE = 8;
+constexpr size_t DEVICE_LOG_MESSAGE_MAX_LEN = 160;
+constexpr unsigned long DEVICE_LOG_FLUSH_MS = 10000UL;
+constexpr unsigned long LED_FLASH_HEARTBEAT_MS = 70UL;
+constexpr unsigned long LED_FLASH_CONFIG_MS = 220UL;
+constexpr unsigned long LED_FLASH_ERROR_MS = 260UL;
 
 WebServer deviceServer(DEVICE_COMMAND_PORT);
 Preferences preferences;
@@ -110,6 +117,11 @@ struct EstadoSaidaLocal {
   unsigned long gapMs;
 };
 
+struct DeviceLogEntry {
+  char level[8];
+  char message[DEVICE_LOG_MESSAGE_MAX_LEN + 1];
+};
+
 #include "sensores_config.h"
 
 constexpr size_t TOTAL_SENSORES = sizeof(sensores) / sizeof(sensores[0]);
@@ -117,20 +129,29 @@ constexpr size_t TOTAL_SENSORES = sizeof(sensores) / sizeof(sensores[0]);
 unsigned long ultimoWifiRetryMs = 0;
 unsigned long ultimoPollMs = 0;
 unsigned long ultimoDeviceSyncMs = 0;
+unsigned long ultimoLogFlushMs = 0;
 unsigned long wifiDesconectadoDesdeMs = 0;
 unsigned long ultimoHealthCheckMs = 0;
 unsigned long ultimoHeartbeatMs = 0;
 unsigned long intervaloPollingBackendMs = DEVICE_POLL_INTERVAL_MS;
+unsigned long ledFlashAteMs = 0;
 uint8_t falhasHealth = 0;
 uint32_t versaoConfiguracaoAplicada = 0;
+size_t totalLogsPendentes = 0;
+uint8_t ledFlashRed = 0;
+uint8_t ledFlashGreen = 0;
+uint8_t ledFlashBlue = 0;
 bool sensoresRegistrados = false;
 bool watchdogAtivo = false;
 bool backendDisponivel = false;
 bool registroBackendTentado = false;
 bool servidorLocalAtivo = false;
 bool preferencesAtivas = false;
+bool ultimoHeartbeatSucesso = true;
+bool ultimoRegistroBackendSucesso = false;
 RegraGatilhoLocal regrasGatilhoLocal[TOTAL_PINOS_GATILHO_LOCAL];
 EstadoSaidaLocal estadosSaidaLocal[TOTAL_PINOS_SAIDA_CONTROLADAS];
+DeviceLogEntry filaLogsDispositivo[DEVICE_LOG_QUEUE_SIZE];
 
 enum EstadoIndicadorLed {
   LedBoot,
@@ -262,6 +283,7 @@ void delayComWatchdog(unsigned long duracaoMs) {
 void reiniciarDispositivo(const char* motivo) {
   Serial.print("Reiniciando: ");
   Serial.println(motivo);
+  anexarLogDispositivo("error", "restart " + String(motivo));
   Serial.flush();
   delay(100);
   ESP.restart();
@@ -291,6 +313,34 @@ void setLedColor(uint8_t red, uint8_t green, uint8_t blue) {
 #elif defined(LED_BUILTIN)
   digitalWrite(LED_BUILTIN, (red || green || blue) ? HIGH : LOW);
 #endif
+}
+
+void dispararFlashLed(uint8_t red, uint8_t green, uint8_t blue, unsigned long duracaoMs) {
+  ledFlashRed = red;
+  ledFlashGreen = green;
+  ledFlashBlue = blue;
+  ledFlashAteMs = millis() + duracaoMs;
+}
+
+void anexarLogDispositivo(const char* level, const String& message) {
+  String saneMessage = message;
+  saneMessage.replace('\n', ' ');
+  saneMessage.replace('\r', ' ');
+  saneMessage.trim();
+  if (saneMessage.length() == 0) {
+    return;
+  }
+
+  if (totalLogsPendentes >= DEVICE_LOG_QUEUE_SIZE) {
+    for (size_t i = 1; i < DEVICE_LOG_QUEUE_SIZE; i++) {
+      filaLogsDispositivo[i - 1] = filaLogsDispositivo[i];
+    }
+    totalLogsPendentes = DEVICE_LOG_QUEUE_SIZE - 1;
+  }
+
+  DeviceLogEntry& entry = filaLogsDispositivo[totalLogsPendentes++];
+  snprintf(entry.level, sizeof(entry.level), "%s", level && strlen(level) ? level : "info");
+  snprintf(entry.message, sizeof(entry.message), "%s", saneMessage.substring(0, DEVICE_LOG_MESSAGE_MAX_LEN).c_str());
 }
 
 bool faseLedLigada(const FaseLed* fases, size_t totalFases, unsigned long tempoDecorridoMs) {
@@ -338,6 +388,12 @@ void sincronizarIndicadorLed() {
 }
 
 void atualizarIndicadorLed() {
+  if (ledFlashAteMs != 0 && static_cast<long>(millis() - ledFlashAteMs) < 0) {
+    setLedColor(ledFlashRed, ledFlashGreen, ledFlashBlue);
+    return;
+  }
+  ledFlashAteMs = 0;
+
   bool ligado = false;
   uint8_t red = 0;
   uint8_t green = 0;
@@ -493,6 +549,23 @@ bool extrairCampoJsonBool(const String& payload, const char* chave, bool valorPa
   if (payload[inicioValor] == '1') return true;
   if (payload[inicioValor] == '0') return false;
   return valorPadrao;
+}
+
+String escaparJson(const String& valor) {
+  String escaped;
+  escaped.reserve(valor.length() + 8);
+  for (size_t i = 0; i < valor.length(); i++) {
+    char caractere = valor[i];
+    switch (caractere) {
+      case '\\': escaped += "\\\\"; break;
+      case '"': escaped += "\\\""; break;
+      case '\n': escaped += "\\n"; break;
+      case '\r': escaped += "\\r"; break;
+      case '\t': escaped += "\\t"; break;
+      default: escaped += caractere; break;
+    }
+  }
+  return escaped;
 }
 
 String extrairArrayJson(const String& payload, const char* chave) {
@@ -1216,6 +1289,10 @@ bool registrarSensoresNoBackend() {
   if (!postJson(montarUrl(SENSOR_REGISTER_ROUTE), payload, httpCode, resposta)) {
     backendDisponivel = false;
     sensoresRegistrados = false;
+    if (ultimoRegistroBackendSucesso) {
+      anexarLogDispositivo("warn", "backend_register_failed");
+    }
+    ultimoRegistroBackendSucesso = false;
     return false;
   }
 
@@ -1229,6 +1306,16 @@ bool registrarSensoresNoBackend() {
   backendDisponivel = sensoresRegistrados;
   if (sensoresRegistrados) {
     ultimoDeviceSyncMs = 0;
+    ultimoLogFlushMs = 0;
+    if (!ultimoRegistroBackendSucesso) {
+      anexarLogDispositivo("info", "backend_registered");
+    }
+    ultimoRegistroBackendSucesso = true;
+  } else {
+    if (ultimoRegistroBackendSucesso) {
+      anexarLogDispositivo("warn", "backend_register_http_" + String(httpCode));
+    }
+    ultimoRegistroBackendSucesso = false;
   }
   return sensoresRegistrados;
 }
@@ -1253,15 +1340,18 @@ void conectarWifi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("WiFi conectado. IP: ");
     Serial.println(WiFi.localIP());
+    anexarLogDispositivo("info", "wifi_connected ip=" + WiFi.localIP().toString());
     setupServidorLocal();
     sensoresRegistrados = false;
     backendDisponivel = false;
     registroBackendTentado = false;
     ultimoDeviceSyncMs = 0;
+    ultimoLogFlushMs = 0;
     atualizarIntervaloPollingBackend(DEVICE_POLL_INTERVAL_MS);
     registrarSensoresNoBackend();
   } else {
     Serial.println("Falha ao conectar no WiFi.");
+    anexarLogDispositivo("warn", "wifi_connect_failed");
   }
 
   sincronizarIndicadorLed();
@@ -1301,10 +1391,26 @@ bool enviarHeartbeatDispositivo() {
   int httpCode = 0;
   String resposta;
   if (!postJson(montarUrl(HEARTBEAT_ROUTE), payload, httpCode, resposta)) {
+    if (ultimoHeartbeatSucesso) {
+      anexarLogDispositivo("warn", "heartbeat_failed");
+    }
+    ultimoHeartbeatSucesso = false;
     return false;
   }
 
   backendDisponivel = httpCode >= 200 && httpCode < 300;
+  if (backendDisponivel) {
+    dispararFlashLed(0, 18, 26, LED_FLASH_HEARTBEAT_MS);
+    if (!ultimoHeartbeatSucesso) {
+      anexarLogDispositivo("info", "heartbeat_restored");
+    }
+    ultimoHeartbeatSucesso = true;
+  } else {
+    if (ultimoHeartbeatSucesso) {
+      anexarLogDispositivo("warn", "heartbeat_http_" + String(httpCode));
+    }
+    ultimoHeartbeatSucesso = false;
+  }
   return backendDisponivel;
 }
 
@@ -1314,7 +1420,7 @@ bool enviarAckConfiguracao(uint32_t configVersion, const char* status, const Str
   payload += "\"config_version\":" + String(configVersion) + ",";
   payload += "\"status\":\"" + String(status) + "\"";
   if (message.length() > 0) {
-    payload += ",\"message\":\"" + message + "\"";
+    payload += ",\"message\":\"" + escaparJson(message) + "\"";
   }
   payload += "}";
 
@@ -1336,7 +1442,7 @@ bool enviarAckComando(const String& commandId, const char* status, const String&
   payload += "\"command_id\":\"" + commandId + "\",";
   payload += "\"status\":\"" + String(status) + "\"";
   if (message.length() > 0) {
-    payload += ",\"message\":\"" + message + "\"";
+    payload += ",\"message\":\"" + escaparJson(message) + "\"";
   }
   payload += "}";
 
@@ -1346,6 +1452,40 @@ bool enviarAckComando(const String& commandId, const char* status, const String&
     return false;
   }
   return httpCode >= 200 && httpCode < 300;
+}
+
+bool enviarLogsDispositivo() {
+  if (totalLogsPendentes == 0 || WiFi.status() != WL_CONNECTED || !sensoresRegistrados) {
+    return false;
+  }
+
+  size_t quantidade = totalLogsPendentes < DEVICE_LOG_BATCH_SIZE ? totalLogsPendentes : DEVICE_LOG_BATCH_SIZE;
+  String payload = "{";
+  payload += "\"device_id\":\"" + String(DEVICE_ID) + "\",\"logs\":[";
+  for (size_t i = 0; i < quantidade; i++) {
+    if (i > 0) payload += ",";
+    payload += "{";
+    payload += "\"level\":\"" + String(filaLogsDispositivo[i].level) + "\",";
+    payload += "\"message\":\"" + escaparJson(String(filaLogsDispositivo[i].message)) + "\",";
+    payload += "\"source\":\"firmware\"";
+    payload += "}";
+  }
+  payload += "]}";
+
+  int httpCode = 0;
+  String resposta;
+  if (!postJson(montarUrl("/api/device/logs"), payload, httpCode, resposta)) {
+    return false;
+  }
+  if (httpCode < 200 || httpCode >= 300) {
+    return false;
+  }
+
+  for (size_t i = quantidade; i < totalLogsPendentes; i++) {
+    filaLogsDispositivo[i - quantidade] = filaLogsDispositivo[i];
+  }
+  totalLogsPendentes -= quantidade;
+  return true;
 }
 
 bool aplicarConfiguracaoRemotaLocal(const String& resposta, uint32_t configVersion, String& erro) {
@@ -1413,8 +1553,12 @@ bool aplicarConfiguracaoRemotaLocal(const String& resposta, uint32_t configVersi
   }
   salvarRegrasGatilhoLocal();
   aplicarConfiguracaoRegrasGatilhoLocal();
+  if (configVersion > versaoConfiguracaoAplicada) {
+    dispararFlashLed(28, 18, 0, LED_FLASH_CONFIG_MS);
+  }
   versaoConfiguracaoAplicada = configVersion;
   salvarVersaoConfiguracaoAplicada();
+  anexarLogDispositivo("info", "config_applied v=" + String(configVersion));
   return true;
 }
 
@@ -1443,6 +1587,8 @@ bool baixarEAplicarConfiguracaoRemota(uint32_t versaoEsperada) {
 
   String erro;
   if (!aplicarConfiguracaoRemotaLocal(resposta, configVersion, erro)) {
+    dispararFlashLed(28, 0, 0, LED_FLASH_ERROR_MS);
+    anexarLogDispositivo("error", "config_apply_error " + erro);
     enviarAckConfiguracao(configVersion, "error", erro);
     return false;
   }
@@ -1467,19 +1613,23 @@ bool executarComandoRemoto(const String& comandoJson) {
     String activeLevel = extrairCampoJsonString(comandoJson, "active_level");
     String erro;
     if (!agendarPulsoLocalValidado(pin, durationMs, repeatCount, repeatGapMs, activeLevel, erro)) {
+      anexarLogDispositivo("error", "command_gpio_pulse_error " + erro);
       enviarAckComando(commandId, "error", erro);
       return false;
     }
+    anexarLogDispositivo("info", "command_gpio_pulse pin=" + String(pin));
     enviarAckComando(commandId, "accepted", "");
     return true;
   }
 
   if (tipo == "refresh_config") {
     bool ok = baixarEAplicarConfiguracaoRemota(versaoConfiguracaoAplicada);
+    anexarLogDispositivo(ok ? "info" : "error", ok ? "command_refresh_config" : "command_refresh_config_failed");
     enviarAckComando(commandId, ok ? "done" : "error", ok ? "" : "config_refresh_failed");
     return ok;
   }
 
+  anexarLogDispositivo("warn", "command_ignored type=" + tipo);
   enviarAckComando(commandId, "ignored", "unsupported_command");
   return true;
 }
@@ -1567,6 +1717,7 @@ void setupSensores() {
 
 void setup() {
   Serial.begin(115200);
+  anexarLogDispositivo("info", "boot");
   setupWatchdog();
   preferencesAtivas = preferences.begin(PREFERENCES_NAMESPACE, false);
   carregarVersaoConfiguracaoAplicada();
@@ -1628,6 +1779,11 @@ void loop() {
     if (!sincronizarBackendDispositivo()) {
       atualizarIntervaloPollingBackend(DEVICE_SYNC_FAIL_RETRY_MS);
     }
+  }
+
+  if (WiFi.status() == WL_CONNECTED && sensoresRegistrados && totalLogsPendentes > 0 && agora - ultimoLogFlushMs >= DEVICE_LOG_FLUSH_MS) {
+    ultimoLogFlushMs = agora;
+    enviarLogsDispositivo();
   }
 
   if (WiFi.status() == WL_CONNECTED && agora - ultimoHealthCheckMs >= HEALTH_CHECK_MS) {

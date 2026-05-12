@@ -279,7 +279,7 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS device_config_state (
                 device_id TEXT PRIMARY KEY,
-                desired_config_version INTEGER NOT NULL DEFAULT 1,
+                desired_config_version INTEGER NOT NULL DEFAULT 0,
                 applied_config_version INTEGER NOT NULL DEFAULT 0,
                 last_config_ack_at TEXT,
                 last_config_status TEXT,
@@ -288,12 +288,22 @@ def init_db() -> None:
             )
             """
         )
-        ensure_column(conn, "device_config_state", "desired_config_version", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "device_config_state", "desired_config_version", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "device_config_state", "applied_config_version", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "device_config_state", "last_config_ack_at", "TEXT")
         ensure_column(conn, "device_config_state", "last_config_status", "TEXT")
         ensure_column(conn, "device_config_state", "last_config_message", "TEXT")
         ensure_column(conn, "device_config_state", "updated_at", "TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            """
+            UPDATE device_config_state
+            SET desired_config_version = 0
+            WHERE desired_config_version = 1
+              AND applied_config_version = 0
+              AND COALESCE(last_config_ack_at, '') = ''
+              AND COALESCE(last_config_status, '') = ''
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS device_commands (
@@ -322,6 +332,26 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_device_commands_device_status
             ON device_commands(device_id, status, available_at_epoch)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                level TEXT NOT NULL,
+                message TEXT NOT NULL,
+                source TEXT,
+                created_at TEXT NOT NULL,
+                created_epoch INTEGER NOT NULL
+            )
+            """
+        )
+        ensure_column(conn, "device_logs", "source", "TEXT")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_device_logs_device_epoch
+            ON device_logs(device_id, created_epoch DESC)
             """
         )
         conn.commit()
@@ -744,7 +774,7 @@ def ensure_device_config_state(device_id: str) -> dict:
             INSERT INTO device_config_state (
                 device_id, desired_config_version, applied_config_version, updated_at
             )
-            VALUES (?, 1, 0, ?)
+            VALUES (?, 0, 0, ?)
             ON CONFLICT(device_id) DO NOTHING
             """,
             (normalized, now_iso),
@@ -763,7 +793,7 @@ def ensure_device_config_state(device_id: str) -> dict:
 
     return dict(row) if row else {
         "device_id": normalized,
-        "desired_config_version": 1,
+        "desired_config_version": 0,
         "applied_config_version": 0,
         "last_config_ack_at": None,
         "last_config_status": None,
@@ -795,7 +825,7 @@ def fetch_device_config_state(device_id: str) -> dict | None:
 def bump_device_config_version(device_id: str) -> dict:
     normalized = device_id.strip()
     state = ensure_device_config_state(normalized)
-    next_version = max(1, int(state.get("desired_config_version") or 1)) + 1
+    next_version = max(0, int(state.get("desired_config_version") or 0)) + 1
     now_iso = app_now().isoformat()
 
     with sqlite3.connect(DB_PATH) as conn:
@@ -823,7 +853,7 @@ def build_device_config_payload(device_id: str) -> dict:
     return {
         "ok": True,
         "device_id": normalized,
-        "config_version": int(state.get("desired_config_version") or 1),
+        "config_version": int(state.get("desired_config_version") or 0),
         "poll_after_ms": DEVICE_POLL_DEFAULT_MS,
         "local_trigger_rules": fetch_device_local_gpio_rules(normalized),
     }
@@ -1044,6 +1074,82 @@ def ack_device_config(payload: dict) -> dict:
     }
 
 
+def sanitize_device_log_level(value: object) -> str:
+    normalized = str(value or "info").strip().lower()
+    if normalized in {"debug", "info", "warn", "warning", "error"}:
+        return "warn" if normalized == "warning" else normalized
+    return "info"
+
+
+def insert_device_logs(payload: dict) -> dict:
+    device_id = str(payload.get("device_id", "")).strip()
+    if not device_id:
+        raise ValueError("device_id_required")
+    if not device_exists(device_id):
+        raise ValueError("device_not_found")
+
+    raw_logs = payload.get("logs")
+    if not isinstance(raw_logs, list) or not raw_logs:
+        raise ValueError("logs_required")
+
+    now = app_now()
+    now_iso = now.isoformat()
+    now_epoch = int(now.timestamp())
+    inserted = 0
+    with sqlite3.connect(DB_PATH) as conn:
+        for entry in raw_logs[:25]:
+            if not isinstance(entry, dict):
+                continue
+            message = str(entry.get("message", "") or "").strip()
+            if not message:
+                continue
+            conn.execute(
+                """
+                INSERT INTO device_logs (
+                    device_id, level, message, source, created_at, created_epoch
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    device_id,
+                    sanitize_device_log_level(entry.get("level")),
+                    message[:500],
+                    str(entry.get("source", "") or "").strip()[:80] or None,
+                    now_iso,
+                    now_epoch,
+                ),
+            )
+            inserted += 1
+        conn.commit()
+
+    return {
+        "device_id": device_id,
+        "inserted": inserted,
+        "created_at": now_iso,
+    }
+
+
+def list_device_logs(device_id: str, limit: int = 100) -> list[dict]:
+    normalized = device_id.strip()
+    if not normalized:
+        return []
+
+    safe_limit = max(1, min(200, int(limit)))
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, device_id, level, message, source, created_at, created_epoch
+            FROM device_logs
+            WHERE device_id = ?
+            ORDER BY created_epoch DESC, id DESC
+            LIMIT ?
+            """,
+            (normalized, safe_limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def build_device_poll_payload(
     device_id: str,
     current_config_version: int,
@@ -1052,7 +1158,7 @@ def build_device_poll_payload(
 ) -> dict:
     normalized = device_id.strip()
     state = ensure_device_config_state(normalized)
-    desired_version = int(state.get("desired_config_version") or 1)
+    desired_version = int(state.get("desired_config_version") or 0)
     commands = fetch_deliverable_device_commands(normalized, limit)
     mark_device_commands_sent(normalized, [str(item["id"]) for item in commands])
 
@@ -1088,7 +1194,7 @@ def device_poll_ready(
         return True
 
     state = fetch_device_config_state(normalized)
-    desired_version = int(state.get("desired_config_version") or 1)
+    desired_version = int(state.get("desired_config_version") or 0)
     if desired_version > max(0, int(current_config_version)):
         return True
     return bool(fetch_deliverable_device_commands(normalized, limit))
@@ -1225,7 +1331,7 @@ def push_device_local_gpio_rules(device_id: str, rules: list[dict]) -> dict:
         "ok": False,
         "pending": True,
         "reason": "awaiting_device_poll",
-        "desired_config_version": int(state.get("desired_config_version") or 1),
+        "desired_config_version": int(state.get("desired_config_version") or 0),
         "rules_sent": len(rules),
     }
 
@@ -2879,10 +2985,11 @@ def build_dashboard_payload() -> dict:
                 "device_local_gpio_rules": fetch_device_local_gpio_rules(device_id),
                 "device_local_trigger_pins": list(LOCAL_TRIGGER_ALLOWED_PINS),
                 "device_local_output_pins": list(LOCAL_TRIGGER_OUTPUT_ALLOWED_PINS),
-                "desired_config_version": int(config_state.get("desired_config_version") or 1),
+                "desired_config_version": int(config_state.get("desired_config_version") or 0),
                 "applied_config_version": int(config_state.get("applied_config_version") or 0),
                 "last_config_ack_at": str(config_state.get("last_config_ack_at", "") or ""),
                 "last_config_status": str(config_state.get("last_config_status", "") or ""),
+                "last_config_message": str(config_state.get("last_config_message", "") or ""),
             }
         )
 
@@ -3101,6 +3208,21 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
             return
 
+        if parsed.path == "/api/devices/logs":
+            device_id = params.get("device_id", [""])[0].strip()
+            if not device_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "device_id_required"})
+                return
+            try:
+                limit = int(params.get("limit", ["80"])[0])
+            except ValueError:
+                limit = 80
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "device_id": device_id, "logs": list_device_logs(device_id, limit)},
+            )
+            return
+
         if parsed.path == "/api/system/cleanup":
             self._send_json(HTTPStatus.OK, cleanup_snapshots())
             return
@@ -3286,6 +3408,17 @@ class SensorHubHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
                 return
             self._send_json(HTTPStatus.OK, {"ok": True, **result})
+            return
+
+        if parsed.path == "/api/device/logs":
+            if not self._require_device_auth():
+                return
+            try:
+                result = insert_device_logs(payload)
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(HTTPStatus.CREATED, {"ok": True, **result})
             return
 
         if parsed.path == "/api/sensors/toggle":

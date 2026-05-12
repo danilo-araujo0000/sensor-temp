@@ -581,6 +581,20 @@
       border-color: rgba(245,158,11,0.35);
       background: rgba(245,158,11,0.12);
     }
+    .device-sync-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .device-sync-chip {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: var(--text-muted);
+      font-size: 0.8rem;
+    }
     .local-trigger-grid {
       display: grid;
       gap: 12px;
@@ -617,6 +631,79 @@
       color: var(--text-muted);
       font-size: 0.86rem;
       font-weight: 600;
+    }
+    .device-log-toolbar {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .device-log-toolbar .form-control {
+      min-width: 220px;
+      flex: 1 1 220px;
+    }
+    .device-log-list {
+      display: grid;
+      gap: 10px;
+      max-height: 420px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+    .device-log-entry {
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .device-log-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 6px;
+    }
+    .device-log-meta {
+      color: var(--text-muted);
+      font-size: 0.82rem;
+    }
+    .device-log-message {
+      color: #fff;
+      font-size: 0.95rem;
+      word-break: break-word;
+    }
+    .log-level {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 54px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .log-level.info {
+      color: #bfdbfe;
+      background: rgba(79,117,255,0.14);
+      border: 1px solid rgba(79,117,255,0.28);
+    }
+    .log-level.warn {
+      color: #fde68a;
+      background: rgba(245,158,11,0.14);
+      border: 1px solid rgba(245,158,11,0.28);
+    }
+    .log-level.error {
+      color: #fecaca;
+      background: rgba(239,68,68,0.14);
+      border: 1px solid rgba(239,68,68,0.28);
+    }
+    .log-level.debug {
+      color: #d1d5db;
+      background: rgba(100,116,139,0.14);
+      border: 1px solid rgba(100,116,139,0.28);
     }
     .form-control {
       width: 100%;
@@ -680,6 +767,18 @@
             <div id="device-local-rules-panel" class="device-config-list"></div>
           </div>
         </details>
+        <details class="config-group">
+          <summary>Logs dos Hubs ESP32</summary>
+          <div class="config-group-content">
+            <div class="section-subline" style="margin-bottom:16px;">Logs recentes enviados pelo firmware em lotes pequenos para diagnostico de rede, sincronizacao de configuracao e execucao de comandos.</div>
+            <div class="device-log-toolbar">
+              <select id="device-log-select" class="form-control"></select>
+              <button id="refresh-device-logs" class="details-link" type="button">Atualizar logs</button>
+            </div>
+            <div id="device-log-feedback" style="font-size:0.9rem; min-height:20px; color:var(--text-muted); margin-bottom:10px;"></div>
+            <div id="device-logs-list" class="device-log-list"></div>
+          </div>
+        </details>
       </div>
     </div>
     <main id="cards" class="grid"></main>
@@ -701,6 +800,8 @@
     let lastDashboardData = null;
     let currentDevices = [];
     let lastDeviceRuleSync = {};
+    let selectedLogDeviceId = '';
+    let deviceConfigWaiters = {};
 
     document.getElementById('toggle-hidden-sensors').addEventListener('change', (e) => {
         showHiddenSensors = e.target.checked;
@@ -759,6 +860,28 @@
       return data;
     }
 
+    async function apiGet(url) {
+      const response = await fetch(url);
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || 'request_failed');
+      }
+      return data;
+    }
+
+    function formatDateTime(isoString) {
+      if (!isoString) return 'sem confirmacao';
+      try {
+        return new Date(isoString).toLocaleString('pt-BR');
+      } catch (error) {
+        return isoString;
+      }
+    }
+
+    function findDeviceById(deviceId) {
+      return (currentDevices || []).find((device) => device.device_id === deviceId) || null;
+    }
+
     function renderContacts(contacts) {
       const listEl = document.getElementById('contact-list');
       if (!contacts.length) {
@@ -803,13 +926,26 @@
     function buildDeviceLocalRuleStatus(device, syncResult = null) {
       const enabledRules = (device.device_local_gpio_rules || []).filter((rule) => !!rule.enabled);
       const endpoint = formatDeviceEndpoint(device);
-      if (syncResult && syncResult.ok) {
-        return `Regras locais sincronizadas com ${syncResult.rules_sent} gatilhos no ESP ${syncResult.device_ip}:${syncResult.command_port}.`;
+      const desiredVersion = Number(device.desired_config_version || 0);
+      const appliedVersion = Number(device.applied_config_version || 0);
+      const waitingVersion = syncResult && Number(syncResult.desired_config_version || 0) > 0
+        ? Number(syncResult.desired_config_version || 0)
+        : desiredVersion;
+
+      if (device.last_config_status === 'error' && desiredVersion > appliedVersion) {
+        const suffix = device.last_config_message ? ` Motivo: ${device.last_config_message}.` : '';
+        return `O ESP reportou erro ao aplicar a configuracao v${desiredVersion}.${suffix}`;
       }
-      if (syncResult && !syncResult.ok) {
-        return `Regras salvas no backend, mas o ESP nao confirmou a sincronizacao. Motivo: ${syncResult.reason || 'desconhecido'}. Hub atual: ${endpoint}.`;
+      if (waitingVersion > appliedVersion) {
+        const suffix = syncResult && syncResult.timeout
+          ? ' O ESP ainda nao confirmou dentro do tempo esperado.'
+          : '';
+        return `Configuracao v${waitingVersion} enviada ao backend. Aguardando o ESP aplicar. Ultima aplicada: v${appliedVersion}.${suffix}`;
       }
-      return `Hub em ${endpoint}. ${enabledRules.length} gatilho(s) local(is) ativo(s).`;
+      if (appliedVersion > 0) {
+        return `ESP confirmou a configuracao v${appliedVersion} em ${formatDateTime(device.last_config_ack_at)}. Hub em ${endpoint}. ${enabledRules.length} gatilho(s) local(is) ativo(s).`;
+      }
+      return `Hub em ${endpoint}. ${enabledRules.length} gatilho(s) local(is) ativo(s). Nenhuma configuracao remota pendente.`;
     }
 
     function renderDeviceLocalConfigs(devices, syncMap = {}) {
@@ -827,6 +963,10 @@
             <div>
               <h3 class="device-config-title">${escapeHtml(device.device_id)}</h3>
               <div class="section-subline">${Number(device.sensor_count || 0)} sensor(es) vinculados &middot; Hub ${escapeHtml(formatDeviceEndpoint(device))}</div>
+              <div class="device-sync-meta">
+                <span class="device-sync-chip">Config aplicada v${Number(device.applied_config_version || 0)}</span>
+                <span class="device-sync-chip">Config desejada v${Number(device.desired_config_version || 0)}</span>
+              </div>
             </div>
             <span class="device-badge ${device.device_online ? 'online' : 'offline'}">${device.device_online ? 'ONLINE' : 'OFFLINE'}</span>
           </div>
@@ -896,41 +1036,185 @@
       });
     }
 
+    function syncDeviceLogSelect(devices) {
+      const select = document.getElementById('device-log-select');
+      if (!select) return;
+      const orderedDevices = Array.isArray(devices) ? devices : [];
+      if (!orderedDevices.length) {
+        selectedLogDeviceId = '';
+        select.innerHTML = '<option value="">Nenhum hub</option>';
+        return;
+      }
+
+      const nextSelected = orderedDevices.some((device) => device.device_id === selectedLogDeviceId)
+        ? selectedLogDeviceId
+        : orderedDevices[0].device_id;
+      selectedLogDeviceId = nextSelected;
+      select.innerHTML = orderedDevices.map((device) => `
+        <option value="${escapeHtml(device.device_id)}" ${device.device_id === nextSelected ? 'selected' : ''}>
+          ${escapeHtml(device.device_id)} ${device.device_online ? '(online)' : '(offline)'}
+        </option>
+      `).join('');
+    }
+
+    function renderDeviceLogs(logs) {
+      const listEl = document.getElementById('device-logs-list');
+      if (!listEl) return;
+      const rows = Array.isArray(logs) ? logs : [];
+      if (!rows.length) {
+        listEl.innerHTML = '<div class="contact-empty">Nenhum log recente para este hub.</div>';
+        return;
+      }
+      listEl.innerHTML = rows.map((entry) => `
+        <div class="device-log-entry">
+          <div class="device-log-head">
+            <span class="log-level ${escapeHtml((entry.level || 'info').toLowerCase())}">${escapeHtml(entry.level || 'info')}</span>
+            <span class="device-log-meta">${escapeHtml(formatDateTime(entry.created_at))}${entry.source ? ` &middot; ${escapeHtml(entry.source)}` : ''}</span>
+          </div>
+          <div class="device-log-message">${escapeHtml(entry.message || '')}</div>
+        </div>
+      `).join('');
+    }
+
+    function setDeviceRuleFeedback(deviceId, message, color) {
+      const feedback = document.querySelector(`.device-config-card[data-device-id="${deviceId}"] .local-device-feedback`);
+      if (!feedback) return;
+      feedback.textContent = message;
+      feedback.style.color = color;
+    }
+
+    async function loadDeviceLogs(deviceId = selectedLogDeviceId, silent = false) {
+      const feedback = document.getElementById('device-log-feedback');
+      const listEl = document.getElementById('device-logs-list');
+      if (!feedback || !listEl) return;
+      if (!deviceId) {
+        feedback.textContent = 'Nenhum hub selecionado.';
+        listEl.innerHTML = '<div class="contact-empty">Selecione um hub para ver os logs.</div>';
+        return;
+      }
+
+      selectedLogDeviceId = deviceId;
+      if (!silent) {
+        feedback.textContent = `Carregando logs de ${deviceId}...`;
+        feedback.style.color = 'var(--text-muted)';
+      }
+      try {
+        const data = await apiGet(`/api/devices/logs?device_id=${encodeURIComponent(deviceId)}&limit=80`);
+        renderDeviceLogs(data.logs || []);
+        feedback.textContent = `Mostrando ${Number((data.logs || []).length)} log(s) recentes de ${deviceId}.`;
+        feedback.style.color = 'var(--text-muted)';
+      } catch (error) {
+        feedback.textContent = 'Falha ao carregar logs do hub.';
+        feedback.style.color = 'var(--danger)';
+        if (!silent) {
+          listEl.innerHTML = '<div class="contact-empty">Nao foi possivel carregar os logs.</div>';
+        }
+      }
+    }
+
+    async function waitForDeviceConfigApplied(deviceId, desiredVersion) {
+      const watcherKey = `${desiredVersion}:${Date.now()}`;
+      deviceConfigWaiters[deviceId] = watcherKey;
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        if (deviceConfigWaiters[deviceId] !== watcherKey) {
+          return;
+        }
+
+        try {
+          const data = await apiGet('/api/dashboard');
+          lastDashboardData = data;
+          currentDevices = data.devices || [];
+          renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
+          syncDeviceLogSelect(currentDevices);
+
+          const device = findDeviceById(deviceId);
+          if (!device) {
+            continue;
+          }
+          const appliedVersion = Number(device.applied_config_version || 0);
+          if (device.last_config_status === 'error' && Number(device.desired_config_version || 0) >= desiredVersion) {
+            lastDeviceRuleSync[deviceId] = {
+              pending: false,
+              error: true,
+              desired_config_version: desiredVersion,
+            };
+            renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
+            setDeviceRuleFeedback(deviceId, `O ESP reportou erro ao aplicar a configuracao v${desiredVersion}.`, 'var(--danger)');
+            delete deviceConfigWaiters[deviceId];
+            return;
+          }
+          if (appliedVersion >= desiredVersion) {
+            lastDeviceRuleSync[deviceId] = {
+              pending: false,
+              ok: true,
+              desired_config_version: desiredVersion,
+            };
+            renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
+            setDeviceRuleFeedback(deviceId, `O ESP confirmou a configuracao v${appliedVersion}.`, 'var(--green)');
+            delete deviceConfigWaiters[deviceId];
+            return;
+          }
+        } catch (error) {
+          // Mantem o estado pendente ate esgotar as tentativas.
+        }
+      }
+
+      if (deviceConfigWaiters[deviceId] === watcherKey) {
+        lastDeviceRuleSync[deviceId] = {
+          pending: true,
+          timeout: true,
+          desired_config_version: desiredVersion,
+        };
+        renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
+        setDeviceRuleFeedback(deviceId, `A configuracao v${desiredVersion} ainda nao foi confirmada pelo ESP.`, 'var(--orange)');
+        delete deviceConfigWaiters[deviceId];
+      }
+    }
+
     async function saveDeviceLocalTriggerRules(button) {
       const card = button.closest('.device-config-card');
       if (!card) return;
       const deviceId = card.dataset.deviceId || '';
-      const feedback = card.querySelector('.local-device-feedback');
       button.disabled = true;
       try {
         const result = await apiPost('/api/devices/local-gpio-rules', {
           device_id: deviceId,
           rules: collectDeviceLocalTriggerRules(card)
         });
+        const desiredVersion = Number(result.sync && result.sync.desired_config_version ? result.sync.desired_config_version : 0);
         currentDevices = currentDevices.map((device) => (
           device.device_id === deviceId
             ? {
                 ...device,
                 device_local_gpio_rules: result.rules || [],
+                desired_config_version: desiredVersion || Number(device.desired_config_version || 0),
                 device_last_seen_ip: result.sync && result.sync.device_ip ? result.sync.device_ip : device.device_last_seen_ip,
                 device_command_port: result.sync && result.sync.command_port ? result.sync.command_port : device.device_command_port
               }
             : device
         ));
-        lastDeviceRuleSync[deviceId] = result.sync || null;
+        lastDeviceRuleSync[deviceId] = {
+          ...(result.sync || {}),
+          pending: true,
+          desired_config_version: desiredVersion || Number((findDeviceById(deviceId) || {}).desired_config_version || 0),
+        };
         window.isDashboardLocalRuleEditing = false;
         renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
-        if (result.sync && result.sync.ok) {
-          feedback.textContent = 'Regras locais salvas e sincronizadas no ESP.';
-          feedback.style.color = 'var(--green)';
+        setDeviceRuleFeedback(
+          deviceId,
+          desiredVersion > 0
+            ? `Regras salvas. Aguardando o ESP aplicar a configuracao v${desiredVersion}...`
+            : 'Regras salvas no backend.',
+          'var(--orange)'
+        );
+        if (desiredVersion > 0) {
+          void waitForDeviceConfigApplied(deviceId, desiredVersion);
         } else {
-          feedback.textContent = 'Regras salvas no backend. O ESP nao confirmou a sincronizacao agora.';
-          feedback.style.color = 'var(--orange)';
+          void loadDashboard(true);
         }
-        window.setTimeout(() => loadDashboard(true), 1200);
       } catch (error) {
-        feedback.textContent = 'Falha ao salvar gatilhos locais.';
-        feedback.style.color = 'var(--danger)';
+        setDeviceRuleFeedback(deviceId, 'Falha ao salvar gatilhos locais.', 'var(--danger)');
       } finally {
         button.disabled = false;
       }
@@ -956,11 +1240,11 @@
     }
 
     async function loadDashboard(forceRedraw = false) {
-      const response = await fetch('/api/dashboard');
-      const data = await response.json();
+      const data = await apiGet('/api/dashboard');
       lastDashboardData = data;
       currentDevices = data.devices || [];
       renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
+      syncDeviceLogSelect(currentDevices);
 
       const visibleSensors = data.sensors.filter(s => s.show_on_dashboard || showHiddenSensors);
 
@@ -1057,6 +1341,8 @@
       configModal.classList.add('active');
       loadContacts();
       renderDeviceLocalConfigs(currentDevices, lastDeviceRuleSync);
+      syncDeviceLogSelect(currentDevices);
+      void loadDeviceLogs(selectedLogDeviceId, true);
     });
 
     document.getElementById('btn-close-config').addEventListener('click', () => {
@@ -1087,6 +1373,18 @@
         await saveDeviceLocalTriggerRules(button);
       });
     }
+
+    const deviceLogSelect = document.getElementById('device-log-select');
+    if (deviceLogSelect) {
+      deviceLogSelect.addEventListener('change', async (event) => {
+        selectedLogDeviceId = event.target.value;
+        await loadDeviceLogs(selectedLogDeviceId);
+      });
+    }
+
+    document.getElementById('refresh-device-logs').addEventListener('click', async () => {
+      await loadDeviceLogs(selectedLogDeviceId);
+    });
 
     document.getElementById('save-contact').addEventListener('click', async () => {
       const feedback = document.getElementById('contact-feedback');
